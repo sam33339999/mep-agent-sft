@@ -1,0 +1,22 @@
+[project]
+name = "mep-sft"
+version = "0.1.0"
+description = "MEP clash-fix SFT data generator"
+requires-python = ">=3.11"
+dependencies = ["plotly>=5.20"]
+
+[project.optional-dependencies]
+dev = ["pytest>=8", "ruff>=0.5"]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/mep_sft"]
+
+[tool.ruff]
+line-length = 100
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
