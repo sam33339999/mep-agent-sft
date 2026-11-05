@@ -13,13 +13,16 @@ import math
 from dataclasses import dataclass, field, replace
 from itertools import pairwise
 
-from .rules import CLASH, CLEAR, SLOPE, WALL, Violation, _wall_local, check_all
+from .rules import CLASH, CLEAR, SLOPE, WALL, Violation, _wall_local, check_all, recheck
 from .scene import SYSTEM_PRIORITY, Opening, Pipe, Scene, r4
 
 STEP = 0.05
 MAX_SHIFT = 1.5
 MAX_JOG = 1.0
 MAX_ITER = 25
+BEAM_WIDTH = 4  # fallback search: states kept per depth
+BEAM_PER_STRATEGY = 2  # best candidates kept per (pipe, strategy)
+BEAM_NODES = 60  # states expanded at most (a budget, so hopeless scenes fail fast)
 TARGET_SLOPE = 0.02
 SIDESTEP_SLACK = 3  # extra violations a headroom/slope sidestep may cause
 
@@ -291,7 +294,7 @@ def _candidates(scene: Scene, pid: str, strategy: str, v: Violation):
 
 
 def _best(scene: Scene, pid: str, strategy: str, v: Violation, count: int,
-          sidestep: bool = False, seen: set | None = None):
+          sidestep: bool = False, seen: set | None = None, base: list[Violation] | None = None):
     """Smallest change for `pid` using `strategy`.
 
     Normally it must strictly lower the violation count. With `sidestep` it may instead keep the
@@ -300,9 +303,11 @@ def _best(scene: Scene, pid: str, strategy: str, v: Violation, count: int,
     """
     best = None
     target = (v.type, tuple(v.ids))
-    known = {(x.type, tuple(x.ids)) for x in check_all(scene)} if sidestep else set()
+    base = check_all(scene) if base is None else base
+    known = {(x.type, tuple(x.ids)) for x in base} if sidestep else set()
     for detail, cand in _candidates(scene, pid, strategy, v):
-        vs = check_all(cand)
+        # only `pid` moved (a wall change can affect any pipe, so that one is checked in full)
+        vs = check_all(cand) if strategy in SCENE_STRATEGIES else recheck(cand, base, pid)
         n = len(vs)
         if sidestep:
             # a single-pipe problem (headroom, slope) can only be cured by moving that pipe, which
@@ -323,7 +328,58 @@ def _best(scene: Scene, pid: str, strategy: str, v: Violation, count: int,
     return best
 
 
+def _beam(scene: Scene) -> SolveResult | None:
+    """Fallback when the greedy walk is stuck: keep several partial fixes and explore them.
+
+    Every move must cure the violation it targets and must not create one that can never be cured;
+    states are ranked by how many violations remain (ties keep the smaller change). Deterministic.
+    """
+    start = copy.deepcopy(scene)
+    frontier = [(start, check_all(start), [])]
+    seen = {_state_key(start)}
+    expanded = 0
+    while frontier and expanded < BEAM_NODES:
+        children = []
+        for cur, vs, acts in frontier:
+            expanded += 1
+            target = vs[0]
+            tid = (target.type, tuple(target.ids))
+            known = {(x.type, tuple(x.ids)) for x in vs}
+            for pid in _movers(cur, target):
+                for strategy in LADDER[target.type]:
+                    if cur.pipe(pid).fixed_ends and strategy in MOVES_ENDS:
+                        continue
+                    scored = []
+                    for k, (detail, cand) in enumerate(_candidates(cur, pid, strategy, target)):
+                        v2 = check_all(cand) if strategy in SCENE_STRATEGIES else recheck(cand, vs, pid)
+                        if any((x.type, tuple(x.ids)) == tid for x in v2):
+                            continue
+                        if any(_dead_end(cand, x) for x in v2 if (x.type, tuple(x.ids)) not in known):
+                            continue
+                        key = _state_key(cand)
+                        if key in seen:
+                            continue
+                        scored.append((len(v2), k, detail, cand, v2, key))
+                    scored.sort(key=lambda t: (t[0], t[1]))
+                    for n2, _, detail, cand, v2, key in scored[:BEAM_PER_STRATEGY]:
+                        seen.add(key)
+                        act = Action(strategy, pid, detail, target.message, len(vs), n2, target.type,
+                                     list(target.ids), [], [list(q) for q in cand.pipe(pid).points])
+                        if not v2:
+                            return SolveResult(True, cand, [*acts, act])
+                        children.append((n2, len(acts), len(children), cand, v2, [*acts, act]))
+        children.sort(key=lambda t: (t[0], t[1], t[2]))
+        frontier = [(c, v, a) for _, _, _, c, v, a in children[:BEAM_WIDTH]]
+    return None
+
+
 def solve(scene: Scene, max_iter: int = MAX_ITER) -> SolveResult:
+    """Greedy walk first (cheap, and the result most scenes get); the beam only when it is stuck."""
+    result = _greedy(scene, max_iter)
+    return result if result.ok else (_beam(scene) or result)
+
+
+def _greedy(scene: Scene, max_iter: int = MAX_ITER) -> SolveResult:
     cur = copy.deepcopy(scene)
     actions: list[Action] = []
     seen = {_state_key(cur)}
@@ -342,7 +398,7 @@ def solve(scene: Scene, max_iter: int = MAX_ITER) -> SolveResult:
                         skipped.append({"pipe_id": pid, "strategy": strategy,
                                         "reason": "fixed_ends"})
                         continue
-                    hit = _best(cur, pid, strategy, target, len(vs), sidestep, seen)
+                    hit = _best(cur, pid, strategy, target, len(vs), sidestep, seen, vs)
                     if hit:
                         actions.append(
                             Action(strategy, pid, hit[1], target.message, len(vs), hit[0],

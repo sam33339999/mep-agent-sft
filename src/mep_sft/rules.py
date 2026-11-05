@@ -42,11 +42,14 @@ def clash_measure(a: Pipe, b: Pipe) -> tuple[float, Vec, Vec]:
     return best[0] - a.outer_radius - b.outer_radius, best[1], best[2]
 
 
-def check_clashes(scene: Scene) -> list[Violation]:
+def check_clashes(scene: Scene, only: str | None = None) -> list[Violation]:
+    """`only`: report just the violations that involve this pipe (same logic, fewer pairs)."""
     out = []
     pipes = scene.pipes
     for i, a in enumerate(pipes):
         for b in pipes[i + 1 :]:
+            if only is not None and only not in (a.id, b.id):
+                continue
             gap, c1, c2 = clash_measure(a, b)
             if gap < scene.rules.clearance - 1e-9:
                 loc = tuple(r4((u + v) / 2) for u, v in zip(c1, c2, strict=True))
@@ -68,11 +71,13 @@ def _wall_local(w: Wall, pt: Vec) -> Vec:
     return (rx * ux + ry * uy, -rx * uy + ry * ux, pt[2])
 
 
-def check_walls(scene: Scene) -> list[Violation]:
+def check_walls(scene: Scene, only: str | None = None) -> list[Violation]:
     out = []
     for w in scene.walls:
         length = math.hypot(w.p1[0] - w.p0[0], w.p1[1] - w.p0[1])
         for p in scene.pipes:
+            if only is not None and p.id != only:
+                continue
             r = p.outer_radius
             lo = (0.0, -w.thickness / 2 - r, w.z0 - r)
             hi = (length, w.thickness / 2 + r, w.z0 + w.height + r)
@@ -98,9 +103,11 @@ def check_walls(scene: Scene) -> list[Violation]:
     return out
 
 
-def check_clear_height(scene: Scene) -> list[Violation]:
+def check_clear_height(scene: Scene, only: str | None = None) -> list[Violation]:
     out = []
     for p in scene.pipes:
+        if only is not None and p.id != only:
+            continue
         lo, hi = scene.rules.limits(p.floor)
         r = p.outer_radius
         low = min(pt[2] for pt in p.points)
@@ -124,11 +131,11 @@ def check_clear_height(scene: Scene) -> list[Violation]:
     return out
 
 
-def check_slopes(scene: Scene) -> list[Violation]:
+def check_slopes(scene: Scene, only: str | None = None) -> list[Violation]:
     out = []
     lo, hi = scene.rules.min_drain_slope, scene.rules.max_drain_slope
     for p in scene.pipes:
-        if p.system != "drainage":
+        if p.system != "drainage" or (only is not None and p.id != only):
             continue
         for a, b in _segments(p):
             run = math.hypot(b[0] - a[0], b[1] - a[1])
@@ -149,8 +156,29 @@ def check_slopes(scene: Scene) -> list[Violation]:
     return out
 
 
+def _order(vs: list[Violation]) -> list[Violation]:
+    return sorted(vs, key=lambda v: (v.type, v.ids))
+
+
 def check_all(scene: Scene) -> list[Violation]:
-    vs = (
+    return _order(
         check_clashes(scene) + check_walls(scene) + check_clear_height(scene) + check_slopes(scene)
     )
-    return sorted(vs, key=lambda v: (v.type, v.ids))
+
+
+def check_pipe(scene: Scene, pipe_id: str) -> list[Violation]:
+    """Every violation that involves this pipe (clashes with others, walls, headroom, slope)."""
+    return _order(
+        check_clashes(scene, pipe_id) + check_walls(scene, pipe_id)
+        + check_clear_height(scene, pipe_id) + check_slopes(scene, pipe_id)
+    )
+
+
+def recheck(scene: Scene, before: list[Violation], moved_pipe: str) -> list[Violation]:
+    """check_all(scene) when only `moved_pipe` changed since `before` was computed.
+
+    A violation that does not involve the moved pipe cannot have changed, so only the moved pipe's
+    own violations are recomputed. Equal to check_all (property-tested), several times faster.
+    """
+    kept = [v for v in before if moved_pipe not in v.ids]
+    return _order(kept + check_pipe(scene, moved_pipe))
