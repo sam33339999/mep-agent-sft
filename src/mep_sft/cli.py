@@ -10,6 +10,7 @@ from .evaluate import evaluate, format_report, gold_predictions, load_jsonl
 from .generator import generate_dataset
 from .rules import check_all
 from .solver import solve
+from .trainfmt import dataset_info, validate_file
 from .viz_plotly import render_before_after
 
 
@@ -88,6 +89,18 @@ def cmd_ifc(args) -> int:
     return 0
 
 
+def cmd_validate(args) -> int:
+    rep = validate_file(Path(args.train), load_with_datasets=not args.no_datasets)
+    print(json.dumps(rep, ensure_ascii=False, indent=1))
+    if args.dataset_info:
+        Path(args.dataset_info).write_text(
+            json.dumps(dataset_info(Path(args.train).name), ensure_ascii=False, indent=2),
+            encoding="utf-8",
+        )
+        print(f"LLaMA-Factory dataset_info -> {args.dataset_info}")
+    return 0 if rep["error_count"] == 0 else 1
+
+
 def main(argv=None) -> int:
     ap = argparse.ArgumentParser(prog="mep_sft")
     sub = ap.add_subparsers(dest="cmd", required=True)
@@ -121,6 +134,11 @@ def main(argv=None) -> int:
     i.add_argument("--case", default="two-pipes", choices=sorted(CASES))
     i.add_argument("--out", default="out/scene.ifc")
     i.set_defaults(fn=cmd_ifc)
+    v = sub.add_parser("validate", help="檢查訓練 JSONL 格式（含 HF datasets 載入）")
+    v.add_argument("--train", default="data/train.jsonl")
+    v.add_argument("--no-datasets", action="store_true")
+    v.add_argument("--dataset-info", help="另存 LLaMA-Factory 的 dataset_info.json 片段")
+    v.set_defaults(fn=cmd_validate)
     args = ap.parse_args(argv)
     return args.fn(args)
 

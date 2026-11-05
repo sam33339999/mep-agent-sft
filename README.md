@@ -7,7 +7,7 @@
 
 ```bash
 uv sync --extra dev            # 核心 + 測試
-uv sync --extra dev --extra ifc  # 另加 IFC 輸出（選配）
+uv sync --extra dev --extra ifc --extra e2e --extra trainfmt  # 另加 IFC、瀏覽器測試、HF datasets 載入檢查（選配）
 ```
 
 ## 常用指令
@@ -16,6 +16,8 @@ uv sync --extra dev --extra ifc  # 另加 IFC 輸出（選配）
 uv run python -m mep_sft demo --case two-pipes --out out/demo   # 最小範例 → out/demo/scene.html
 uv run python -m mep_sft generate --n 200 --seed 0 --out data/raw.jsonl   # 場景 + solver 解
 uv run python -m mep_sft assemble --raw data/raw.jsonl --out data/train.jsonl   # 訓練 JSONL
+uv run python -m mep_sft validate --train data/train.jsonl --dataset-info data/dataset_info.json   # 格式檢查 + HF datasets 載入
+uv run python -m mep_sft ifc --case opening --out out/opening.ifc   # IFC 輸出（需 ifc extra）
 uv run python -m mep_sft eval --raw data/raw.jsonl --gold        # 標準答案自測（應為 100%）
 uv run python -m mep_sft eval --raw data/raw.jsonl --pred preds.jsonl   # 替模型輸出打分
 uv run python -m mep_sft serve --port 8000                       # 審核網站
@@ -47,9 +49,21 @@ generator → scene ─┬→ rules → violations ─┐
 - 看圖學習：平面圖＋立面圖、編號標記、違規白話解說、逐步導覽、測驗模式、名詞表。
 - `/viewer?id=樣本編號`：Three.js 3D 檢視器（修正前→後滑桿、真實圓管、牆開口）。
 
+## 餵給訓練框架
+
+`validate` 會逐筆檢查結構（角色順序、`<think>` 恰好一組），再用 HF `datasets.load_dataset("json")` 實際載入
+（LLaMA-Factory、Axolotl、Unsloth 都是這條路）。`--dataset-info` 會寫出 LLaMA-Factory 用的設定片段
+（OpenAI messages 格式，`formatting: sharegpt`）。`assemble --no-meta` 可輸出只含 `messages` 的檔案。
+
+## 多樓層
+
+難度 4 會建兩層樓（每層 3.2 m 一層）。管線有所屬樓層，淨高與天花板限制從該層樓板起算；題目文字會列出
+各層的絕對標高限制。平面圖會把各層疊在一起顯示。
+
 ## 已知限制
 
-- 未實作多樓層；難度以管數、系統數、問題數、開口與固定端點區分。
-- solver 尚無「裁短管線」策略；穿牆的無開口案例可能被解成把整條管平移到牆外。
+- 牆穿透的修法有「沿牆滑到開口」與「在牆前截短（保留較長一側，至少 0.5 m）」；沒有「新增開口」這個動作。
 - 牆開口只在穿牆中點檢查；斜穿牆可能有誤差。
-- 難度 4 的 solver 解出率偏低（約 25%），無解場景會被丟棄並記錄在統計。
+- 難度 3、4 的 solver 解出率偏低（約 43%、26%），無解場景會被丟棄並記錄在統計。
+- 尚未實際用 LLaMA-Factory 跑過訓練（只驗證 HF datasets 能載入、格式符合其 messages 規格）。
+- IFC 以 ifcopenshell 幾何引擎驗證過座標與開口體積，但未用 BlenderBIM 實際開啟。
