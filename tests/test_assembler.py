@@ -27,7 +27,7 @@ def test_fix_variants_json_actually_fixes_the_scene():
         for variant in ("fix_full", "fix_direct"):
             rec = assemble(s, variant)
             data = extract_json(_answer(rec))
-            fixed = apply_fix(Scene.from_dict(s["scene"]), data["fixed_pipes"])
+            fixed = apply_fix(Scene.from_dict(s["scene"]), data["fixed_pipes"], data["new_openings"])
             assert fixed is not None and check_all(fixed) == [], (s["id"], variant)
 
 
