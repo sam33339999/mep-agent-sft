@@ -150,7 +150,7 @@ async function loadList() {
   for (const s of items) {
     const hide = state.quiz && !state.revealed.has(s.id); // quiz: chips would give the answer away
     box.append(el("div", { className: "item" + (state.cur?.id === s.id ? " sel" : ""),
-      onclick: () => { location.hash = s.id; openSample(s.id); } },
+      onclick: () => (location.hash.slice(1) === s.id ? openSample(s.id) : (location.hash = s.id)) },
       el("div", { className: "t", textContent: s.id }),
       el("span", { className: "chip", textContent: "難度 " + s.difficulty }),
       hide ? [] : s.issue_types.length
@@ -249,7 +249,11 @@ async function renderFull(id) {
       el("span", { className: "muted", textContent: "點上方任一項違規，這裡會用白話說明量到什麼、為什麼是問題、圖上怎麼看。" })),
     el("div", { id: "steps" }),
     el("h3", {}, "答案檢查"), check,
-    el("h3", {}, "微調修正（有修改的管線完整路徑）"), pipesBox,
+    el("h3", {}, "微調修正（有修改的管線完整路徑）"),
+    s.variant === "detect_only"
+      ? el("div", { className: "muted", textContent: "此題型為「只列違規」：答案不含修正座標，修改座標不會改變答案文字（請直接編輯下方文字）。" })
+      : "",
+    pipesBox,
     el("div", { className: "actions" },
       el("button", { textContent: "驗證並預覽", onclick: preview }),
       el("button", { className: "primary", textContent: "存成新版本", onclick: saveVersion }),
@@ -333,7 +337,9 @@ $("#gen").onclick = async () => {
 $("#diff").onchange = loadList;
 $("#quiz").onchange = (e) => { state.quiz = e.target.checked; loadList(); if (state.cur) openSample(state.cur.id); };
 renderTabs(); loadList();
-if (location.hash.length > 1) openSample(decodeURIComponent(location.hash.slice(1)));
+const openFromHash = () => location.hash.length > 1 && openSample(decodeURIComponent(location.hash.slice(1)));
+addEventListener("hashchange", openFromHash); // back button, pasted links, programmatic navigation
+openFromHash();
 </script>
 </body>
 </html>
