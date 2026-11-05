@@ -78,6 +78,16 @@ def cmd_eval(args) -> int:
     return 0
 
 
+def cmd_ifc(args) -> int:
+    from .demo import demo_scene
+    from .ifc_export import export_ifc
+
+    scene = demo_scene(args.case)
+    export_ifc(scene, args.out)
+    print(f"IFC -> {args.out}")
+    return 0
+
+
 def main(argv=None) -> int:
     ap = argparse.ArgumentParser(prog="mep_sft")
     sub = ap.add_subparsers(dest="cmd", required=True)
@@ -107,6 +117,10 @@ def main(argv=None) -> int:
     e.add_argument("--gold", action="store_true", help="用標準答案當預測（自我檢查，應為 100%）")
     e.add_argument("--json", help="另存完整結果")
     e.set_defaults(fn=cmd_eval)
+    i = sub.add_parser("ifc", help="把示範場景輸出成 IFC（需 --extra ifc）")
+    i.add_argument("--case", default="two-pipes", choices=sorted(CASES))
+    i.add_argument("--out", default="out/scene.ifc")
+    i.set_defaults(fn=cmd_ifc)
     args = ap.parse_args(argv)
     return args.fn(args)
 

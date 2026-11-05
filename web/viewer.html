@@ -1,0 +1,280 @@
+<!doctype html>
+<html lang="zh-Hant">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>MEP 3D 檢視器</title>
+<style>
+  :root { --bg:#eef1f5; --panel:rgba(255,255,255,.92); --line:#d5dae2; --text:#1d2430;
+          --mute:#667085; --bad:#c62828; --ok:#1a7f37; --accent:#1f6feb; }
+  @media (prefers-color-scheme: dark) {
+    :root { --bg:#12161c; --panel:rgba(27,33,43,.92); --line:#2e3744; --text:#e6e9ee;
+            --mute:#97a1b0; --bad:#ff6b6b; --ok:#4cc26d; --accent:#58a6ff; } }
+  html, body { margin:0; height:100%; background:var(--bg); color:var(--text);
+               font:14px/1.5 system-ui,"Noto Sans TC",sans-serif; overflow:hidden; }
+  canvas { display:block; }
+  .panel { position:absolute; background:var(--panel); border:1px solid var(--line);
+           border-radius:10px; padding:10px 14px; backdrop-filter:blur(4px); }
+  #ctl { top:12px; left:12px; width:300px; } #vio { top:12px; right:12px; width:360px;
+           max-height:calc(100% - 24px); overflow:auto; }
+  h1 { font-size:15px; margin:0 0 6px; } h3 { font-size:14px; margin:0 0 6px; }
+  .row { display:flex; align-items:center; gap:8px; margin:6px 0; flex-wrap:wrap; }
+  input[type=range] { flex:1; } label { cursor:pointer; user-select:none; }
+  .muted { color:var(--mute); } .bad { color:var(--bad); } .ok { color:var(--ok); }
+  .v { cursor:pointer; padding:6px 0; border-bottom:1px solid var(--line); }
+  .v:hover { background:rgba(127,127,127,.12); } .v b { color:var(--accent); }
+  .v .ex { display:none; margin-top:4px; font-size:13px; } .v.open .ex { display:block; }
+  .legend span { display:inline-block; margin-right:10px; }
+  .dot { display:inline-block; width:10px; height:10px; border-radius:50%; margin-right:4px; }
+  a { color:var(--accent); }
+</style>
+<script type="importmap">
+{ "imports": { "three": "https://cdn.jsdelivr.net/npm/three@0.160.0/build/three.module.js",
+               "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.160.0/examples/jsm/" } }
+</script>
+</head>
+<body>
+<div id="ctl" class="panel">
+  <h1 id="title">載入中…</h1>
+  <div class="muted" id="sub"></div>
+  <div class="row"><span>修正前</span><input id="t" type="range" min="0" max="1" step="0.01" value="0"><span>修正後</span></div>
+  <div class="row"><button id="b0">修正前</button><button id="b1">修正後</button><button id="play">▶ 動畫</button></div>
+  <div class="row">
+    <label><input type="checkbox" id="cWalls" checked> 牆</label>
+    <label><input type="checkbox" id="cPlanes" checked> 淨高面／天花板</label>
+    <label><input type="checkbox" id="cMarks" checked> 違規標記</label>
+    <label><input type="checkbox" id="cLabels" checked> 管線 ID</label>
+  </div>
+  <div class="legend muted">
+    <span><i class="dot" style="background:#1f77b4"></i>給水</span>
+    <span><i class="dot" style="background:#8c564b"></i>排水</span>
+    <span><i class="dot" style="background:#7f7f7f"></i>風管</span>
+    <span><i class="dot" style="background:#e6a700"></i>電氣</span>
+    <span><i class="dot" style="background:#2ca02c"></i>被移動</span>
+  </div>
+  <div class="muted" style="margin-top:6px">左鍵旋轉・右鍵平移・滾輪縮放。橘色面＝淨高線，淡藍面＝天花板。</div>
+  <div class="row"><a id="back" href="/">← 回審核頁</a></div>
+</div>
+<div id="vio" class="panel"><h3>違規</h3><div id="vlist" class="muted">載入中…</div></div>
+<script type="module">
+import * as THREE from "three";
+import { OrbitControls } from "three/addons/controls/OrbitControls.js";
+
+THREE.Object3D.DEFAULT_UP.set(0, 0, 1); // scenes are Z-up
+const NUM = "①②③④⑤⑥⑦⑧⑨⑩";
+const num = (i) => (i < NUM.length ? NUM[i] : `(${i + 1})`);
+const COLORS = { drainage: 0x8c564b, duct: 0x7f7f7f, water: 0x1f77b4, electrical: 0xe6a700 };
+const MOVED = 0x2ca02c;
+const $ = (s) => document.querySelector(s);
+
+const renderer = new THREE.WebGLRenderer({ antialias: true });
+renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
+document.body.prepend(renderer.domElement);
+const scene3 = new THREE.Scene();
+scene3.background = new THREE.Color(getComputedStyle(document.body).backgroundColor);
+const camera = new THREE.PerspectiveCamera(45, 1, 0.05, 500);
+camera.up.set(0, 0, 1);
+const controls = new OrbitControls(camera, renderer.domElement);
+controls.enableDamping = true;
+scene3.add(new THREE.HemisphereLight(0xffffff, 0x8890a0, 1.1));
+const sun = new THREE.DirectionalLight(0xffffff, 1.6); sun.position.set(6, -8, 12); scene3.add(sun);
+
+const grpWalls = new THREE.Group(), grpPlanes = new THREE.Group(), grpPipes = new THREE.Group(),
+      grpMarks = new THREE.Group(), grpLabels = new THREE.Group();
+scene3.add(grpWalls, grpPlanes, grpPipes, grpMarks, grpLabels);
+
+let data = null, T = 0;
+
+function resize() {
+  renderer.setSize(innerWidth, innerHeight);
+  camera.aspect = innerWidth / innerHeight; camera.updateProjectionMatrix();
+}
+addEventListener("resize", resize); resize();
+
+function clear(g) {
+  g.children.slice().forEach((o) => {
+    g.remove(o);
+    o.traverse((n) => { n.geometry?.dispose(); n.material?.map?.dispose(); n.material?.dispose?.(); });
+  });
+}
+
+function textSprite(text, color = "#111", size = 0.32, bg = null) {
+  const c = document.createElement("canvas"); c.width = 256; c.height = 128;
+  const g = c.getContext("2d");
+  if (bg) { g.fillStyle = bg; g.beginPath(); g.roundRect(8, 24, 240, 80, 18); g.fill(); }
+  g.font = "bold 64px system-ui, sans-serif"; g.textAlign = "center"; g.textBaseline = "middle";
+  g.fillStyle = color; g.fillText(text, 128, 66);
+  const m = new THREE.SpriteMaterial({ map: new THREE.CanvasTexture(c), depthTest: false, transparent: true });
+  const s = new THREE.Sprite(m); s.scale.set(size * 2, size, 1); s.renderOrder = 10;
+  return s;
+}
+
+// ---------------------------------------------------------------- walls (with real openings)
+function buildWalls(scene) {
+  clear(grpWalls);
+  for (const w of scene.walls) {
+    const dx = w.p1[0] - w.p0[0], dy = w.p1[1] - w.p0[1], L = Math.hypot(dx, dy);
+    const shape = new THREE.Shape();
+    shape.moveTo(0, w.z0); shape.lineTo(L, w.z0); shape.lineTo(L, w.z0 + w.height); shape.lineTo(0, w.z0 + w.height);
+    for (const o of w.openings || []) {
+      const h = new THREE.Path();
+      h.moveTo(o.u0, o.z0); h.lineTo(o.u1, o.z0); h.lineTo(o.u1, o.z1); h.lineTo(o.u0, o.z1); h.closePath();
+      shape.holes.push(h);
+    }
+    const geo = new THREE.ExtrudeGeometry(shape, { depth: w.thickness, bevelEnabled: false });
+    geo.translate(0, 0, -w.thickness / 2);
+    const ux = dx / L, uy = dy / L;
+    const m = new THREE.Matrix4().makeBasis(
+      new THREE.Vector3(ux, uy, 0), new THREE.Vector3(0, 0, 1), new THREE.Vector3(uy, -ux, 0));
+    m.setPosition(w.p0[0], w.p0[1], 0); geo.applyMatrix4(m);
+    const mesh = new THREE.Mesh(geo, new THREE.MeshStandardMaterial({
+      color: 0x9aa0a8, transparent: true, opacity: 0.22, depthWrite: false, side: THREE.DoubleSide }));
+    grpWalls.add(mesh);
+    grpWalls.add(new THREE.LineSegments(new THREE.EdgesGeometry(geo, 20),
+      new THREE.LineBasicMaterial({ color: 0x6b7280 })));
+  }
+}
+
+function bounds(scene) {
+  const b = new THREE.Box3();
+  scene.walls.forEach((w) => { b.expandByPoint(new THREE.Vector3(w.p0[0], w.p0[1], 0));
+    b.expandByPoint(new THREE.Vector3(w.p1[0], w.p1[1], w.height)); });
+  scene.pipes.forEach((p) => p.points.forEach((q) => b.expandByPoint(new THREE.Vector3(...q))));
+  return b;
+}
+
+function buildPlanes(scene) {
+  clear(grpPlanes);
+  const b = bounds(scene), sz = b.getSize(new THREE.Vector3()), c = b.getCenter(new THREE.Vector3());
+  const plane = (z, color, op) => {
+    const m = new THREE.Mesh(new THREE.PlaneGeometry(sz.x + 1, sz.y + 1),
+      new THREE.MeshBasicMaterial({ color, transparent: true, opacity: op, side: THREE.DoubleSide, depthWrite: false }));
+    m.position.set(c.x, c.y, z); grpPlanes.add(m);
+  };
+  const floor = new THREE.GridHelper(Math.max(sz.x, sz.y) + 2, Math.round(Math.max(sz.x, sz.y) + 2), 0x888888, 0xbbbbbb);
+  floor.rotation.x = Math.PI / 2; floor.position.set(c.x, c.y, 0); grpPlanes.add(floor);
+  plane(scene.rules.min_clear_height, 0xff8c00, 0.16);
+  plane(scene.rules.ceiling_height, 0x58a6ff, 0.10);
+}
+
+// ---------------------------------------------------------------- pipes
+function pipePoints(p, fixedPipe, t) {
+  if (!fixedPipe) return p.points;
+  const a = p.points, b = fixedPipe.points;
+  if (a.length !== b.length) return t < 0.5 ? a : b; // a detour changes topology: switch at the midpoint
+  return a.map((q, i) => q.map((v, k) => v + (b[i][k] - v) * t));
+}
+
+function buildPipes(t) {
+  clear(grpPipes); clear(grpLabels);
+  const fixedById = Object.fromEntries(data.fixed_scene.pipes.map((p) => [p.id, p]));
+  for (const p of data.scene.pipes) {
+    const f = fixedById[p.id];
+    const moved = JSON.stringify(f.points) !== JSON.stringify(p.points);
+    const color = moved && t > 0.01 ? MOVED : COLORS[p.system] ?? 0x444444;
+    const pts = pipePoints(p, f, t).map((q) => new THREE.Vector3(...q));
+    const r = p.diameter / 2;
+    const mat = new THREE.MeshStandardMaterial({ color, roughness: 0.45, metalness: 0.15 });
+    for (let i = 0; i + 1 < pts.length; i++) {
+      const a = pts[i], b = pts[i + 1], len = a.distanceTo(b);
+      if (len < 1e-6) continue;
+      const mk = (rad, material) => {
+        const m = new THREE.Mesh(new THREE.CylinderGeometry(rad, rad, len, 24, 1), material);
+        m.position.copy(a).add(b).multiplyScalar(0.5);
+        m.quaternion.setFromUnitVectors(new THREE.Vector3(0, 1, 0), b.clone().sub(a).normalize());
+        return m;
+      };
+      grpPipes.add(mk(r, mat));
+      if (p.insulation) grpPipes.add(mk(r + p.insulation, new THREE.MeshStandardMaterial({
+        color: 0xf2e6c8, transparent: true, opacity: 0.35, depthWrite: false })));
+    }
+    for (let i = 1; i + 1 < pts.length; i++) { // elbows
+      const s = new THREE.Mesh(new THREE.SphereGeometry(r, 18, 12), mat); s.position.copy(pts[i]); grpPipes.add(s);
+    }
+    const mid = pts[0].clone().add(pts[pts.length - 1]).multiplyScalar(0.5); mid.z += r + 0.18;
+    const lab = textSprite(p.id, "#111", 0.22, "rgba(255,255,255,.85)"); lab.position.copy(mid); grpLabels.add(lab);
+  }
+}
+
+function buildMarks(t) {
+  clear(grpMarks);
+  const vs = t < 0.5 ? data.violations : data.violations_after || [];
+  vs.forEach((v, i) => {
+    const m = new THREE.Mesh(new THREE.OctahedronGeometry(0.12),
+      new THREE.MeshBasicMaterial({ color: 0xff2d2d, depthTest: false, transparent: true, opacity: 0.9 }));
+    m.position.set(...v.location); m.renderOrder = 9; grpMarks.add(m);
+    const s = textSprite(num(i), "#ff2d2d", 0.34); s.position.set(v.location[0], v.location[1], v.location[2] + 0.3);
+    grpMarks.add(s);
+  });
+}
+
+function refresh() {
+  buildPipes(T); buildMarks(T);
+  grpMarks.visible = $("#cMarks").checked; grpLabels.visible = $("#cLabels").checked;
+  $("#t").value = T;
+}
+
+function frame() {
+  const b = bounds(data.scene), c = b.getCenter(new THREE.Vector3()), sz = b.getSize(new THREE.Vector3());
+  const d = Math.max(sz.x, sz.y, 4);
+  controls.target.copy(c);
+  camera.position.set(c.x + d * 0.7, c.y - d * 1.1, c.z + d * 0.75);
+  controls.update();
+}
+
+function focus(v) {
+  const p = new THREE.Vector3(...v.location);
+  controls.target.copy(p);
+  camera.position.copy(p).add(new THREE.Vector3(1.6, -2.2, 1.3));
+  controls.update();
+}
+
+function renderList() {
+  const box = $("#vlist"); box.replaceChildren();
+  if (!data.violations.length) { box.className = "ok"; box.textContent = "✓ 原場景沒有違規（答案應為「無需修正」）"; return; }
+  box.className = "";
+  data.violations.forEach((v, i) => {
+    const e = data.explain_before?.[i];
+    const d = document.createElement("div"); d.className = "v";
+    d.innerHTML = `<div class="bad"></div><div class="ex"></div>`;
+    d.firstChild.textContent = `${num(i)} ${v.message}`;
+    if (e) d.lastChild.innerHTML = ["怎麼算", "代表什麼"].map((k, j) =>
+      `<div><b>${k}：</b><span></span></div>`).join("");
+    if (e) { const sp = d.lastChild.querySelectorAll("span"); sp[0].textContent = e.calc; sp[1].textContent = e.meaning; }
+    d.onclick = () => { d.classList.toggle("open"); T = 0; refresh(); focus(v); };
+    box.append(d);
+  });
+}
+
+async function main() {
+  const id = new URLSearchParams(location.search).get("id");
+  if (!id) { $("#title").textContent = "請在網址加上 ?id=樣本編號"; return; }
+  $("#back").href = "/#" + encodeURIComponent(id);
+  data = await (await fetch("/api/samples/" + encodeURIComponent(id))).json();
+  if (!data.fixed_scene) { $("#title").textContent = "此樣本的答案格式有誤，無法顯示修正後"; return; }
+  $("#title").textContent = data.id;
+  $("#sub").textContent = `難度 ${data.difficulty}・違規 ${data.violations.length} → ${data.violations_after?.length ?? "?"}`;
+  T = Math.min(1, Math.max(0, +(new URLSearchParams(location.search).get("t") || 0)));
+  buildWalls(data.scene); buildPlanes(data.scene); frame(); refresh(); renderList();
+}
+
+$("#t").oninput = (e) => { T = +e.target.value; refresh(); };
+$("#b0").onclick = () => { T = 0; refresh(); };
+$("#b1").onclick = () => { T = 1; refresh(); };
+let timer = null;
+$("#play").onclick = () => {
+  if (timer) { clearInterval(timer); timer = null; $("#play").textContent = "▶ 動畫"; return; }
+  T = 0; $("#play").textContent = "■ 停止";
+  timer = setInterval(() => { T = Math.min(1, T + 0.02); refresh(); if (T >= 1) { clearInterval(timer); timer = null; $("#play").textContent = "▶ 動畫"; } }, 40);
+};
+$("#cWalls").onchange = (e) => (grpWalls.visible = e.target.checked);
+$("#cPlanes").onchange = (e) => (grpPlanes.visible = e.target.checked);
+$("#cMarks").onchange = (e) => (grpMarks.visible = e.target.checked);
+$("#cLabels").onchange = (e) => (grpLabels.visible = e.target.checked);
+
+(function loop() { requestAnimationFrame(loop); controls.update(); renderer.render(scene3, camera); })();
+main().catch((e) => { $("#title").textContent = "載入失敗：" + e.message; });
+window.__viewer = { setT: (t) => { T = t; refresh(); }, ready: () => !!data };
+</script>
+</body>
+</html>

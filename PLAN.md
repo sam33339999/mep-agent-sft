@@ -1,5 +1,7 @@
 # PLAN：MEP Agent SFT 資料生成專案
 
+> 進度：Phase 0–8 已完成（各 phase 一個 commit）。使用方式見 `README.md`。
+
 對應規格見 `SPEC.md`。本文件定義實作順序、架構與驗收標準。
 
 ## 0. 目標與範圍

@@ -74,6 +74,10 @@ def create_app(db_path: str = "data/review.db") -> FastAPI:
         html = (WEB / "index.html").read_text(encoding="utf-8")
         return html.replace("{{PLOTLY_VERSION}}", get_plotlyjs_version())
 
+    @app.get("/viewer", response_class=HTMLResponse)
+    def viewer():
+        return (WEB / "viewer.html").read_text(encoding="utf-8")
+
     @app.get("/api/stats")
     def stats():
         return store.stats()

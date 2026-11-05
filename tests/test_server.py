@@ -129,3 +129,12 @@ def test_malformed_payloads_rejected(client):
     assert client.post(f"/api/samples/{sid}/preview", json={"fixed_pipes": [{"id": "NOPE", "points": [[0, 0, 0], [1, 1, 1]]}]}).status_code == 422
     assert client.post(f"/api/samples/{sid}/versions", json={"fixed_pipes": [{"id": "P1"}]}).status_code == 422
     assert client.get("/api/samples/missing").status_code == 404
+
+
+def test_viewer_page_is_served_and_reads_the_json_api(client):
+    html = client.get("/viewer").text
+    assert "three" in html and "OrbitControls" in html and "/api/samples/" in html
+    d = _fix_sample(client)
+    # everything the viewer draws comes from this one payload
+    assert d["scene"]["walls"] and d["fixed_scene"]["pipes"] and "violations" in d
+    assert all(len(p["points"]) >= 2 for p in d["fixed_scene"]["pipes"])

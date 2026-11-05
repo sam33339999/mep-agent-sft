@@ -236,6 +236,8 @@ async function renderFull(id) {
     el("h2", {}, s.id, " ", el("span", { className: "st-" + s.status, textContent: STATUS[s.status] })),
     el("div", { className: "muted", textContent:
       `難度 ${s.difficulty}・題型 ${s.variant}・seed ${s.seed}・目前 v${cur.version}（${cur.source}）` }),
+    el("div", {}, el("a", { href: `/viewer?id=${encodeURIComponent(s.id)}`, target: "_blank",
+      textContent: "🧊 在 Three.js 3D 檢視器開啟（滑桿看修正前→後）" })),
     banner, learnPanel(),
     el("div", { id: "fig", style: "height:1900px;margin-top:8px" }),
     el("div", { className: "row" },
