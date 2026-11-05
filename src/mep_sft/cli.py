@@ -6,6 +6,7 @@ from pathlib import Path
 
 from .assembler import assemble_file
 from .demo import CASES, demo_scene
+from .evaluate import evaluate, format_report, gold_predictions, load_jsonl
 from .generator import generate_dataset
 from .rules import check_all
 from .solver import solve
@@ -67,6 +68,16 @@ def cmd_serve(args) -> int:
     return 0
 
 
+def cmd_eval(args) -> int:
+    raw = load_jsonl(Path(args.raw))
+    preds = gold_predictions(raw) if args.gold else load_jsonl(Path(args.pred))
+    rep = evaluate({s["id"]: s for s in raw}, preds)
+    print(format_report(rep))
+    if args.json:
+        Path(args.json).write_text(json.dumps(rep, ensure_ascii=False, indent=1), encoding="utf-8")
+    return 0
+
+
 def main(argv=None) -> int:
     ap = argparse.ArgumentParser(prog="mep_sft")
     sub = ap.add_subparsers(dest="cmd", required=True)
@@ -90,6 +101,12 @@ def main(argv=None) -> int:
     sv.add_argument("--host", default="127.0.0.1")
     sv.add_argument("--port", type=int, default=8000)
     sv.set_defaults(fn=cmd_serve)
+    e = sub.add_parser("eval", help="用規則檢查器替模型輸出打分")
+    e.add_argument("--raw", default="data/raw.jsonl", help="含場景的 raw JSONL")
+    e.add_argument("--pred", help='預測 JSONL，每行 {"id":..., "output":...}')
+    e.add_argument("--gold", action="store_true", help="用標準答案當預測（自我檢查，應為 100%）")
+    e.add_argument("--json", help="另存完整結果")
+    e.set_defaults(fn=cmd_eval)
     args = ap.parse_args(argv)
     return args.fn(args)
 
