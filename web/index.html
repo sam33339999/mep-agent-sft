@@ -221,7 +221,7 @@ async function renderFull(id) {
   const s = await api("/api/samples/" + id);
   state.cur = s;
   const cur = s.current, sc = s.status_check;
-  const pipesBox = el("textarea", { id: "pipes", rows: 8, value: JSON.stringify(cur.fixed_pipes, null, 1) });
+  const pipesBox = el("textarea", { id: "pipes", rows: 8, value: JSON.stringify({ fixed_pipes: cur.fixed_pipes, new_openings: cur.new_openings }, null, 1) });
   const textBox = el("textarea", { id: "text", rows: 14, value: cur.assistant_text });
   const regen = el("input", { type: "checkbox", id: "regen", checked: true });
   const reason = el("input", { id: "reason", placeholder: "退回 / override 原因", size: 22 });
@@ -249,7 +249,7 @@ async function renderFull(id) {
       el("span", { className: "muted", textContent: "點上方任一項違規，這裡會用白話說明量到什麼、為什麼是問題、圖上怎麼看。" })),
     el("div", { id: "steps" }),
     el("h3", {}, "答案檢查"), check,
-    el("h3", {}, "微調修正（有修改的管線完整路徑）"),
+    el("h3", {}, "微調修正（有修改的管線完整路徑 fixed_pipes、新增的牆開口 new_openings）"),
     s.variant === "detect_only"
       ? el("div", { className: "muted", textContent: "此題型為「只列違規」：答案不含修正座標，修改座標不會改變答案文字（請直接編輯下方文字）。" })
       : "",
@@ -283,7 +283,7 @@ async function loadSteps(id, cur) {
     txt.textContent = (i ? `第 ${i} 步：` : "") + st.text;
     meta.textContent = `步驟 ${i} / ${steps.length - 1}・剩餘違規 ${st.violations}` + (st.highlight.length ? `・本步移動 ${st.highlight.join("、")}` : "");
     const r = await api(`/api/samples/${id}/preview`, { method: "POST",
-      body: { fixed_pipes: st.fixed_pipes, highlight: st.highlight } });
+      body: { fixed_pipes: st.fixed_pipes, new_openings: st.new_openings, highlight: st.highlight } });
     draw(r.figure);
   };
   box.replaceChildren(el("div", { className: "card steps", style: "margin-top:12px" },
@@ -298,16 +298,18 @@ function draw(fig) { Plotly.react("fig", fig.data, fig.layout, { responsive: tru
 
 async function preview() {
   try {
-    const pipes = JSON.parse($("#pipes").value);
-    const r = await api(`/api/samples/${state.cur.id}/preview`, { method: "POST", body: { fixed_pipes: pipes } });
+    const ans = JSON.parse($("#pipes").value);
+    const r = await api(`/api/samples/${state.cur.id}/preview`, { method: "POST",
+      body: { fixed_pipes: ans.fixed_pipes, new_openings: ans.new_openings ?? [] } });
     draw(r.figure);
     $("#after").replaceChildren(vlist(r.violations_after, [], "✓ 已無違規", false));
   } catch (e) { toast("預覽失敗：" + e.message); }
 }
 async function saveVersion() {
   try {
-    const pipes = JSON.parse($("#pipes").value);
-    const body = { fixed_pipes: pipes, regenerate_text: $("#regen").checked };
+    const ans = JSON.parse($("#pipes").value);
+    const body = { fixed_pipes: ans.fixed_pipes, new_openings: ans.new_openings ?? [],
+                   regenerate_text: $("#regen").checked };
     if ($("#text").value !== state.cur.current.assistant_text) body.assistant_text = $("#text").value;
     const r = await api(`/api/samples/${state.cur.id}/versions`, { method: "POST", body });
     toast(`已存成 v${r.version}`); renderFull(state.cur.id);

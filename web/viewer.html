@@ -211,7 +211,10 @@ function buildMarks(t) {
   });
 }
 
+let wallsShown = null;
 function refresh() {
+  const state = T < 0.5 ? "before" : "after"; // new wall openings appear with the corrected state
+  if (wallsShown !== state) { buildWalls(state === "before" ? data.scene : data.fixed_scene); wallsShown = state; }
   buildPipes(T); buildMarks(T);
   grpMarks.visible = $("#cMarks").checked; grpLabels.visible = $("#cLabels").checked;
   $("#t").value = T;
@@ -258,7 +261,7 @@ async function main() {
   $("#title").textContent = data.id;
   $("#sub").textContent = `難度 ${data.difficulty}・違規 ${data.violations.length} → ${data.violations_after?.length ?? "?"}`;
   T = Math.min(1, Math.max(0, +(new URLSearchParams(location.search).get("t") || 0)));
-  buildWalls(data.scene); buildPlanes(data.scene); frame(); refresh(); renderList();
+  buildPlanes(data.scene); frame(); refresh(); renderList();
 }
 
 $("#t").oninput = (e) => { T = +e.target.value; refresh(); };

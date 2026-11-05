@@ -16,7 +16,8 @@ CREATE TABLE IF NOT EXISTS samples (
 );
 CREATE TABLE IF NOT EXISTS versions (
   sample_id TEXT, version INTEGER, fixed_pipes_json TEXT, assistant_text TEXT,
-  source TEXT, note TEXT, created_at TEXT, PRIMARY KEY (sample_id, version)
+  source TEXT, note TEXT, created_at TEXT, new_openings_json TEXT DEFAULT '[]',
+  PRIMARY KEY (sample_id, version)
 );
 CREATE TABLE IF NOT EXISTS reviews (
   id INTEGER PRIMARY KEY AUTOINCREMENT, sample_id TEXT, version INTEGER, decision TEXT,
@@ -40,9 +41,13 @@ class Store:
             cols = {r["name"] for r in self.db.execute("PRAGMA table_info(samples)")}
             if "actions_json" not in cols:  # database created before step-by-step replay existed
                 self.db.execute("ALTER TABLE samples ADD COLUMN actions_json TEXT DEFAULT '[]'")
+            vcols = {r["name"] for r in self.db.execute("PRAGMA table_info(versions)")}
+            if "new_openings_json" not in vcols:  # database created before new wall openings
+                self.db.execute("ALTER TABLE versions ADD COLUMN new_openings_json TEXT DEFAULT '[]'")
 
     # -- samples
-    def add_sample(self, sample: dict, variant: str, fixed_pipes: list, text: str) -> bool:
+    def add_sample(self, sample: dict, variant: str, fixed_pipes: list, text: str,
+                   new_openings: list | None = None) -> bool:
         """Insert as pending with version 1; False when the same scene is already stored."""
         with self.lock:
             if self.db.execute(
@@ -60,8 +65,10 @@ class Store:
                  json.dumps(sample["violations"]), ts, json.dumps(sample.get("actions", []))),
             )
             self.db.execute(
-                "INSERT INTO versions VALUES (?,?,?,?,?,?,?)",
-                (sample["id"], 1, json.dumps(fixed_pipes), text, "auto", "solver", ts),
+                "INSERT INTO versions (sample_id, version, fixed_pipes_json, assistant_text, source,"
+                " note, created_at, new_openings_json) VALUES (?,?,?,?,?,?,?,?)",
+                (sample["id"], 1, json.dumps(fixed_pipes), text, "auto", "solver", ts,
+                 json.dumps(new_openings or [])),
             )
             self.db.commit()
             return True
@@ -108,21 +115,24 @@ class Store:
             ).fetchall()
         return [
             {"version": r["version"], "fixed_pipes": json.loads(r["fixed_pipes_json"]),
+             "new_openings": json.loads(r["new_openings_json"] or "[]"),
              "assistant_text": r["assistant_text"], "source": r["source"], "note": r["note"],
              "created_at": r["created_at"]}
             for r in rows
         ]
 
     def add_version(self, sample_id: str, fixed_pipes: list, text: str, source: str,
-                    note: str = "") -> int:
+                    note: str = "", new_openings: list | None = None) -> int:
         """New version; any earlier approval is withdrawn because the content changed."""
         with self.lock:
             n = self.db.execute(
                 "SELECT COALESCE(MAX(version),0)+1 FROM versions WHERE sample_id=?", (sample_id,)
             ).fetchone()[0]
             self.db.execute(
-                "INSERT INTO versions VALUES (?,?,?,?,?,?,?)",
-                (sample_id, n, json.dumps(fixed_pipes), text, source, note, now()),
+                "INSERT INTO versions (sample_id, version, fixed_pipes_json, assistant_text, source,"
+                " note, created_at, new_openings_json) VALUES (?,?,?,?,?,?,?,?)",
+                (sample_id, n, json.dumps(fixed_pipes), text, source, note, now(),
+                 json.dumps(new_openings or [])),
             )
             self.db.execute(
                 "UPDATE samples SET status='pending', approved_version=NULL WHERE id=?",

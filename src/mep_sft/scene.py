@@ -35,6 +35,7 @@ class Wall:
     height: float = 3.0
     z0: float = 0.0
     openings: list[Opening] = field(default_factory=list)
+    allow_openings: bool = True  # False for structural walls: no new sleeves may be requested
 
 
 @dataclass

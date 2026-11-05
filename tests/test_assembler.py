@@ -107,3 +107,42 @@ def test_new_wall_actions_are_described():
     a = res.actions[0]
     d = {"kind": a.kind, "pipe_id": a.pipe_id, "detail": a.detail, "ids": a.ids}
     assert "開口" in action_text(opening(), res.fixed, d)
+
+
+def test_new_opening_is_in_the_answer_and_it_fixes_the_scene():
+    from mep_sft.demo import opening as opening_scene
+    from mep_sft.solver import solve as solve_scene
+    sc = opening_scene()
+    sc.walls[0].openings = []
+    sc.pipe("C").fixed_ends = True
+    res = solve_scene(sc)
+    raw = {
+        "id": "x", "seed": 0, "difficulty": 1, "scene_hash": "h", "scene": sc.to_dict(),
+        "violations": [v.to_dict() for v in __import__("mep_sft.rules", fromlist=["x"]).check_all(sc)],
+        "fixed": res.fixed.to_dict(),
+        "actions": [{"kind": a.kind, "pipe_id": a.pipe_id, "detail": a.detail, "resolved": a.resolved,
+                     "vtype": a.vtype, "ids": a.ids, "skipped": a.skipped, "points": a.points,
+                     "violations_before": a.violations_before, "violations_after": a.violations_after}
+                    for a in res.actions],
+    }
+    text = _answer(assemble(raw, "fix_full"))
+    assert "新增開口" in text and "牆 W1" in text
+    data = extract_json(text)
+    assert data["fixed_pipes"] == [] and len(data["new_openings"]) == 1
+    fixed = apply_fix(sc, data["fixed_pipes"], data["new_openings"])
+    assert fixed is not None and check_all(fixed) == []
+    # the prompt tells the model which walls accept new openings
+    assert "可新增開口" in assemble(raw, "fix_full")["messages"][1]["content"]
+
+
+def test_apply_fix_rejects_openings_in_structural_walls_and_nonsense():
+    from mep_sft.demo import opening as opening_scene
+    sc = opening_scene()
+    ok = {"wall": "W1", "u0": 1.0, "u1": 1.5, "z0": 0.0, "z1": 1.0}
+    assert apply_fix(sc, [], [ok]) is not None
+    sc.walls[0].allow_openings = False
+    assert apply_fix(sc, [], [ok]) is None
+    sc.walls[0].allow_openings = True
+    for bad in ({**ok, "wall": "NOPE"}, {**ok, "u0": 2.0, "u1": 1.0}, {**ok, "u1": 99.0},
+                {**ok, "z1": 9.0}, {"wall": "W1"}):
+        assert apply_fix(sc, [], [bad]) is None

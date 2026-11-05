@@ -94,9 +94,9 @@ def test_edit_makes_new_version_and_withdraws_approval(base, page):
     page.get_by_role("button", name="已核准").click()
     page.locator(".item").first.click()
     page.wait_for_selector("#pipes")
-    pipes = json.loads(page.input_value("#pipes"))
-    pipes[0]["points"][0][2] = round(pipes[0]["points"][0][2] + 0.05, 4)
-    page.fill("#pipes", json.dumps(pipes))
+    ans = json.loads(page.input_value("#pipes"))
+    ans["fixed_pipes"][0]["points"][0][2] = round(ans["fixed_pipes"][0]["points"][0][2] + 0.05, 4)
+    page.fill("#pipes", json.dumps(ans))
     page.get_by_role("button", name="驗證並預覽").click()
     page.wait_for_function("document.querySelector('#after').innerText.length > 0")
     page.get_by_role("button", name="存成新版本").click()
@@ -111,10 +111,10 @@ def test_invalid_edit_cannot_be_approved_without_override(base, page):
     page.goto(f"{base}/#{target['id']}")
     page.wait_for_function(f"document.querySelector('h2')?.innerText.startsWith('{target['id']}')")
     page.wait_for_selector("#pipes")
-    pipes = json.loads(page.input_value("#pipes"))
-    for q in pipes[0]["points"]:
+    ans = json.loads(page.input_value("#pipes"))
+    for q in ans["fixed_pipes"][0]["points"]:
         q[2] = 2.0  # below the clear-height line
-    page.fill("#pipes", json.dumps(pipes))
+    page.fill("#pipes", json.dumps(ans))
     nxt = json.loads(page.request.get(f"{base}/api/samples/{target['id']}").text())["current"]["version"] + 1
     page.get_by_role("button", name="存成新版本").click()
     for _ in range(300):

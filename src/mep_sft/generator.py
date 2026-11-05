@@ -93,7 +93,7 @@ def _room(rng: random.Random, lv: Level) -> Scene:
         corners = [((0.0, 0.0), (float(w), 0.0)), ((float(w), 0.0), (float(w), float(d))),
                    ((float(w), float(d)), (0.0, float(d))), ((0.0, float(d)), (0.0, 0.0))]
         for i, (p0, p1) in enumerate(corners, 1):
-            scene.walls.append(Wall(f"{tag}W{i}", p0, p1, WALL_T, ceiling, z0))
+            scene.walls.append(Wall(f"{tag}W{i}", p0, p1, WALL_T, ceiling, z0, allow_openings=False))
         if lv.interior_wall:
             wid = f"{tag}W5"
             scene.walls.append(
@@ -165,9 +165,12 @@ def build_clean(rng: random.Random, difficulty: int) -> Scene:
     for _ in range(target * 12):
         if len(scene.pipes) >= target:
             break
-        p = _try_pipe(rng, scene, rng.choice(lv.systems), rng.randrange(lv.floors))
+        floor = rng.randrange(lv.floors)
+        p = _try_pipe(rng, scene, rng.choice(lv.systems), floor)
         if p is None:
             continue
+        if p.system == "duct" and any(q.system == "duct" and q.floor == floor for q in scene.pipes):
+            continue  # a duct fills most of the headroom band: at most one per storey
         scene.pipes.append(p)
         if check_all(scene):
             scene.pipes.pop()
@@ -242,6 +245,8 @@ def mut_clash(rng: random.Random, scene: Scene, lv: Level) -> bool:
 def mut_wall(rng: random.Random, scene: Scene, lv: Level) -> bool:
     walls = list(scene.walls)
     rng.shuffle(walls)
+    if rng.random() < 0.4:  # often cross a wall that can take a new opening, so that fix is exercised
+        walls.sort(key=lambda w: not w.allow_openings)
     for wall in walls:
         horiz = abs(wall.p1[1] - wall.p0[1]) < 1e-9  # wall runs along x
         ax = 1 if horiz else 0  # pipe runs along the other axis
@@ -346,6 +351,12 @@ def generate_scene(seed: int, difficulty: int, attempt: int = 0) -> Scene:
     if lv.fixed_prob:
         for p in scene.pipes:
             p.fixed_ends = rng.random() < lv.fixed_prob
+        # Clear-height and slope errors can only be cured by moving a pipe's ends, so a pipe with
+        # such an error cannot also be tied to equipment at both ends (that scene has no answer).
+        walls = {w.id: w for w in scene.walls}
+        for v in check_all(scene):
+            if v.type in (CLEAR, SLOPE) or (v.type == WALL and not walls[v.ids[1]].allow_openings):
+                scene.pipe(v.ids[0]).fixed_ends = False
     scene.meta.update({"seed": seed, "difficulty": difficulty, "attempt": attempt})
     return scene
 

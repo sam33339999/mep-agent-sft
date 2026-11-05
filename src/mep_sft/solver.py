@@ -14,12 +14,14 @@ from dataclasses import dataclass, field, replace
 from itertools import pairwise
 
 from .rules import CLASH, CLEAR, SLOPE, WALL, Violation, _wall_local, check_all
-from .scene import SYSTEM_PRIORITY, Pipe, Scene, r4
+from .scene import SYSTEM_PRIORITY, Opening, Pipe, Scene, r4
 
 STEP = 0.05
 MAX_SHIFT = 1.5
 MAX_JOG = 1.0
+MAX_ITER = 25
 TARGET_SLOPE = 0.02
+SIDESTEP_SLACK = 3  # extra violations a headroom/slope sidestep may cause
 
 
 def _ladder(max_mag: float) -> list[float]:
@@ -37,7 +39,7 @@ SHIFT_XY = [
 
 @dataclass
 class Action:
-    kind: str  # shift_z | shift_xy | jog_z | jog_xy | reslope | slide_wall | trim
+    kind: str  # shift_z | shift_xy | jog_z | jog_xy | reslope | slide_wall | trim | add_opening
     pipe_id: str
     detail: dict
     resolved: str  # message of the violation that triggered it
@@ -64,7 +66,7 @@ def _with_points(scene: Scene, pid: str, pts: list) -> Scene:
 
 
 def _snap_up(x: float) -> float:
-    return math.ceil(x / STEP - 1e-9) * STEP
+    return r4(math.ceil(x / STEP - 1e-9) * STEP)
 
 
 def _movers(scene: Scene, v: Violation) -> list[str]:
@@ -159,6 +161,37 @@ def _slide_wall(p: Pipe, v: Violation, scene: Scene):
         yield {"dx": r4(mx), "dy": r4(my)}, [(r4(x + mx), r4(y + my), z) for x, y, z in p.points]
 
 
+def _snap_down(x: float) -> float:
+    return r4(math.floor(x / STEP + 1e-9) * STEP)
+
+
+def _add_opening(p: Pipe, v: Violation, scene: Scene):
+    """Ask for a new opening (sleeve) in the wall around where the pipe crosses it."""
+    wall = next(w for w in scene.walls if w.id == v.ids[1])
+    if not wall.allow_openings:
+        return
+    i, _ = _nearest_segment(p, v.location)
+    a, b = p.points[i], p.points[i + 1]
+    la, lb = _wall_local(wall, a), _wall_local(wall, b)
+    if la[1] * lb[1] >= 0:
+        return
+    t = la[1] / (la[1] - lb[1])
+    u, z = la[0] + (lb[0] - la[0]) * t, la[2] + (lb[2] - la[2]) * t
+    length = math.hypot(wall.p1[0] - wall.p0[0], wall.p1[1] - wall.p0[1])
+    r = p.outer_radius
+    for margin in (0.1, 0.15, 0.2):
+        u0, u1 = max(_snap_down(u - r - margin), 0.0), min(_snap_up(u + r + margin), length)
+        z0 = max(_snap_down(z - r - margin), wall.z0)
+        z1 = min(_snap_up(z + r + margin), r4(wall.z0 + wall.height))
+        if any(u0 < o.u1 and o.u0 < u1 and z0 < o.z1 and o.z0 < z1 for o in wall.openings):
+            continue  # would overlap an existing opening
+        new = Opening(u0, u1, z0, z1)
+        walls = [replace(w, openings=[*w.openings, new]) if w.id == wall.id else w
+                 for w in scene.walls]
+        yield ({"wall": wall.id, "u0": u0, "u1": u1, "z0": z0, "z1": z1},
+               replace(scene, walls=walls))
+
+
 MIN_KEEP = 0.5  # a trimmed pipe must stay at least this long
 
 
@@ -217,13 +250,14 @@ def _reslope(p: Pipe, v: Violation, scene: Scene):
     yield {"mode": "raise_upstream", "slope": TARGET_SLOPE}, list(reversed(up))
 
 
+SCENE_STRATEGIES = {"add_opening": _add_opening}  # these change the wall, not the pipe
 STRATEGIES = {
     "shift_z": _shift_z, "shift_xy": _shift_xy, "jog_z": _jog_z, "jog_xy": _jog_xy,
     "reslope": _reslope, "slide_wall": _slide_wall, "trim": _trim,
 }
 LADDER = {
     CLASH: ["shift_z", "shift_xy", "jog_z", "jog_xy"],
-    WALL: ["slide_wall", "trim", "shift_xy", "shift_z", "jog_xy", "jog_z"],
+    WALL: ["slide_wall", "trim", "add_opening", "shift_xy", "shift_z", "jog_xy", "jog_z"],
     CLEAR: ["shift_z", "jog_z", "shift_xy"],
     SLOPE: ["reslope"],
 }
@@ -232,46 +266,99 @@ LADDER = {
 MOVES_ENDS = {"shift_z", "shift_xy", "reslope", "slide_wall", "trim"}
 
 
-def _best(scene: Scene, pid: str, strategy: str, v: Violation, count: int):
-    """Smallest change that strictly lowers the violation count, or None."""
-    best = None
+def _state_key(scene: Scene) -> tuple:
+    return (tuple((p.id, tuple(p.points)) for p in scene.pipes),
+            tuple((w.id, len(w.openings)) for w in scene.walls))
+
+
+def _dead_end(scene: Scene, v: Violation) -> bool:
+    """A violation no later step can cure: a single-pipe problem on a pipe whose ends are fixed
+    (a wall can still be cured by a new opening when that wall allows one)."""
+    if v.type not in (CLEAR, SLOPE, WALL):
+        return False
+    if v.type == WALL and next(w for w in scene.walls if w.id == v.ids[1]).allow_openings:
+        return False
+    return all(scene.pipe(i).fixed_ends for i in v.ids if any(p.id == i for p in scene.pipes))
+
+
+def _candidates(scene: Scene, pid: str, strategy: str, v: Violation):
+    """(detail, candidate scene) for every option of one strategy, smallest change first."""
+    if strategy in SCENE_STRATEGIES:
+        yield from SCENE_STRATEGIES[strategy](scene.pipe(pid), v, scene)
+        return
     for detail, pts in STRATEGIES[strategy](scene.pipe(pid), v, scene):
-        cand = _with_points(scene, pid, pts)
-        n = len(check_all(cand))
-        if n < count and (best is None or n < best[0]):
+        yield detail, _with_points(scene, pid, pts)
+
+
+def _best(scene: Scene, pid: str, strategy: str, v: Violation, count: int,
+          sidestep: bool = False, seen: set | None = None):
+    """Smallest change for `pid` using `strategy`.
+
+    Normally it must strictly lower the violation count. With `sidestep` it may instead keep the
+    count equal as long as it cures the target violation itself (the problem moves elsewhere and is
+    handled next) and reaches a state not visited before.
+    """
+    best = None
+    target = (v.type, tuple(v.ids))
+    known = {(x.type, tuple(x.ids)) for x in check_all(scene)} if sidestep else set()
+    for detail, cand in _candidates(scene, pid, strategy, v):
+        vs = check_all(cand)
+        n = len(vs)
+        if sidestep:
+            # a single-pipe problem (headroom, slope) can only be cured by moving that pipe, which
+            # may collide with a few others; those collisions are then settled by the normal ladder
+            slack = SIDESTEP_SLACK if v.type in (CLEAR, SLOPE) else 0
+            if n > count + slack or any((x.type, tuple(x.ids)) == target for x in vs):
+                continue
+            if seen is not None and _state_key(cand) in seen:
+                continue
+            if any(_dead_end(cand, x) for x in vs if (x.type, tuple(x.ids)) not in known):
+                continue
+        elif n >= count:
+            continue
+        if best is None or n < best[0]:
             best = (n, detail, cand)
             if n == 0:
                 break
     return best
 
 
-def solve(scene: Scene, max_iter: int = 30) -> SolveResult:
+def solve(scene: Scene, max_iter: int = MAX_ITER) -> SolveResult:
     cur = copy.deepcopy(scene)
     actions: list[Action] = []
+    seen = {_state_key(cur)}
     for _ in range(max_iter):
         vs = check_all(cur)
         if not vs:
             return SolveResult(True, cur, actions)
         target = vs[0]
-        skipped: list[dict] = []
-        for pid in _movers(cur, target):
-            hit = None
-            for strategy in LADDER[target.type]:
-                if cur.pipe(pid).fixed_ends and strategy in MOVES_ENDS:
-                    skipped.append({"pipe_id": pid, "strategy": strategy, "reason": "fixed_ends"})
-                    continue
-                hit = _best(cur, pid, strategy, target, len(vs))
+        hit_any = False
+        for sidestep in (False, True):  # first a strictly better move, else a sidestep
+            skipped: list[dict] = []
+            for pid in _movers(cur, target):
+                hit = None
+                for strategy in LADDER[target.type]:
+                    if cur.pipe(pid).fixed_ends and strategy in MOVES_ENDS:
+                        skipped.append({"pipe_id": pid, "strategy": strategy,
+                                        "reason": "fixed_ends"})
+                        continue
+                    hit = _best(cur, pid, strategy, target, len(vs), sidestep, seen)
+                    if hit:
+                        actions.append(
+                            Action(strategy, pid, hit[1], target.message, len(vs), hit[0],
+                                   target.type, list(target.ids), skipped,
+                                   [list(q) for q in hit[2].pipe(pid).points])
+                        )
+                        break
+                    skipped.append({"pipe_id": pid, "strategy": strategy,
+                                    "reason": "no_improvement"})
                 if hit:
-                    actions.append(
-                        Action(strategy, pid, hit[1], target.message, len(vs), hit[0],
-                               target.type, list(target.ids), skipped,
-                               [list(q) for q in hit[2].pipe(pid).points])
-                    )
+                    cur = hit[2]
+                    seen.add(_state_key(cur))
+                    hit_any = True
                     break
-                skipped.append({"pipe_id": pid, "strategy": strategy, "reason": "no_improvement"})
-            if hit:
-                cur = hit[2]
+            if hit_any:
                 break
-        else:
+        if not hit_any:
             return SolveResult(False, cur, actions, vs)
     return SolveResult(False, cur, actions, check_all(cur))

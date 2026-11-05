@@ -11,7 +11,7 @@ import json
 import random
 from pathlib import Path
 
-from .answer import render_block
+from .answer import new_openings_payload, render_block
 from .scene import SYSTEM_PRIORITY, Scene
 
 SYSTEM_ZH = {"drainage": "排水", "duct": "風管", "water": "給水", "electrical": "電氣"}
@@ -55,6 +55,7 @@ def describe_scene(scene: Scene) -> str:
             )
             extra = f"，開口：{ops}"
         base = f"，底部標高 {n(w.z0)} m" if w.z0 else ""
+        extra += "，可新增開口" if w.allow_openings else ""
         lines.append(
             f"- 牆 {w.id}：從 ({n(w.p0[0])},{n(w.p0[1])}) 到 ({n(w.p1[0])},{n(w.p1[1])})，"
             f"厚 {n(w.thickness)} m，高 {n(w.height)} m{base}{extra}"
@@ -84,13 +85,16 @@ def describe_scene(scene: Scene) -> str:
     return "\n".join(lines)
 
 
+_FIX_FORMAT = (
+    '格式：{"fixed_pipes":[{"id":"管線編號","points":[[x,y,z],...]}],'
+    '"new_openings":[{"wall":"牆編號","u0":沿牆起點,"u1":沿牆終點,"z0":下緣標高,"z1":上緣標高}]}。'
+    "new_openings 只能用在標示「可新增開口」的牆。"
+)
 TASKS = {
-    "fix_full": "請找出並修正所有違規，最後以 ```json 區塊輸出有修改的管線完整路徑，"
-                '格式：{"fixed_pipes":[{"id":"管線編號","points":[[x,y,z],...]}]}，並說明理由。'
-                "若無需修正，fixed_pipes 給空陣列。",
-    "fix_direct": "請直接修正所有違規，以 ```json 區塊輸出有修改的管線完整路徑，"
-                  '格式：{"fixed_pipes":[{"id":"管線編號","points":[[x,y,z],...]}]}。'
-                  "若無需修正，fixed_pipes 給空陣列。",
+    "fix_full": "請找出並修正所有違規，最後以 ```json 區塊輸出有修改的管線完整路徑與新增的牆開口，"
+                f"{_FIX_FORMAT}並說明理由。若無需修正，兩個陣列都給空陣列。",
+    "fix_direct": "請直接修正所有違規，以 ```json 區塊輸出有修改的管線完整路徑與新增的牆開口，"
+                  f"{_FIX_FORMAT}若無需修正，兩個陣列都給空陣列。",
     "detect_only": "請只列出所有違規，不要修正。最後以 ```json 區塊輸出，"
                    '格式：{"violations":[{"type":"clash|wall_penetration|clear_height|'
                    'drain_slope","ids":["涉及的編號"]}]}。無違規時 violations 給空陣列。',
@@ -138,6 +142,7 @@ def _priority_sentence(scene: Scene, a: dict) -> str:
 STRATEGY_ZH = {
     "shift_z": "垂直位移", "shift_xy": "水平平移", "jog_z": "垂直繞道", "jog_xy": "水平繞道",
     "reslope": "調整坡度", "slide_wall": "沿牆滑動對準開口", "trim": "截短管線",
+    "add_opening": "新增牆開口",
 }
 
 
@@ -151,6 +156,9 @@ def _action_text(scene: Scene, fixed: Scene, a: dict) -> str:
     k = a["kind"]
     if k == "shift_z":
         return f"將 {pid} 整條{_dir(d['dz'], '上移', '下移')} {n(abs(d['dz']))} m"
+    if k == "add_opening":
+        return (f"在牆 {d['wall']} 新增開口（沿牆 {n(d['u0'])}~{n(d['u1'])} m、"
+                f"標高 {n(d['z0'])}~{n(d['z1'])} m），讓 {pid} 照原路徑穿過")
     if k == "slide_wall":
         moves = [f"{_dir(d[ax], plus, minus)} 平移 {n(abs(d[ax]))} m"
                  for ax, plus, minus in (("dx", "往 +X", "往 -X"), ("dy", "往 +Y", "往 -Y")) if d[ax]]
@@ -204,15 +212,21 @@ def _think(sample: dict, scene: Scene, fixed: Scene, rng: random.Random, short: 
     if short:
         return "\n".join(lines)
     changed = _changed(scene, fixed)
-    if sample["actions"] or changed:
+    opened = new_openings_payload(scene, fixed)
+    if sample["actions"] or changed or opened:
         lines.append("處理方式：")
     if not sample["actions"]:  # hand-edited answer: no solver trace, describe the result
         for p in changed:
             lines.append(f"- 將 {p.id} 改為 {path(p.points)}。")
+        for o in opened:
+            lines.append(f"- 在牆 {o['wall']} 新增開口（沿牆 {n(o['u0'])}~{n(o['u1'])} m）。")
     for a in sample["actions"]:
         why = _priority_sentence(scene, a)
         gain = a["violations_before"] - a["violations_after"]
-        extra = f"，一次消除 {gain} 項違規" if gain > 1 else ""
+        extra = (
+            f"，一次消除 {gain} 項違規" if gain > 1
+            else "，這項違規解除了，但會牽動另一項，下一步處理" if gain == 0 else ""
+        )
         lines.append(f"- {why + '：' if why else ''}{_action_text(scene, fixed, a)}{extra}。")
     lines.append(
         rng.choice(("重新檢查修正後的場景：", "套用後再驗證一次："))
@@ -237,17 +251,24 @@ def _violation_list(vs: list[dict]) -> str:
 
 def _fix_answer(sample: dict, scene: Scene, fixed: Scene, with_reason: bool) -> str:
     changed = _changed(scene, fixed)
-    if not changed:
-        return "檢查結果：無需修正，所有管線維持原位。\n" + render_block({"fixed_pipes": []})
+    opened = new_openings_payload(scene, fixed)
+    payload = {"fixed_pipes": fixed_pipes_payload(scene, fixed), "new_openings": opened}
+    if not changed and not opened:
+        return "檢查結果：無需修正，所有管線維持原位。\n" + render_block(payload)
     lines = ["修正結果："]
     for p in changed:
         lines.append(f"- 管線 {p.id}：改為 {path(p.points)}")
+    for o in opened:
+        lines.append(
+            f"- 牆 {o['wall']}：新增開口，沿牆 {n(o['u0'])}~{n(o['u1'])} m、"
+            f"標高 {n(o['z0'])}~{n(o['z1'])} m"
+        )
     lines.append(f"- 其餘 {len(scene.pipes) - len(changed)} 條管線維持原位")
     if with_reason:
         # the violations as stated in the prompt (not the intermediate states between solver steps)
         reasons = [v["message"] for v in sample["violations"]]
         lines.append("理由：" + "；".join(reasons) + "。上述修改後，重新檢查已無任何違規。")
-    return "\n".join(lines) + "\n" + render_block({"fixed_pipes": fixed_pipes_payload(scene, fixed)})
+    return "\n".join(lines) + "\n" + render_block(payload)
 
 
 def _detect_answer(sample: dict) -> str:

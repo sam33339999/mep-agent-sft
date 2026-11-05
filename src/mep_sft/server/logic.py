@@ -17,6 +17,10 @@ def canonical(fixed_pipes: list[dict]) -> list:
     return sorted((p["id"], [[round(c, 4) for c in q] for q in p["points"]]) for p in fixed_pipes)
 
 
+def canonical_openings(openings: list[dict]) -> list:
+    return sorted((o["wall"], *(round(o[k], 4) for k in ("u0", "u1", "z0", "z1"))) for o in openings)
+
+
 def valid_payload(fixed_pipes) -> bool:
     try:
         return all(
@@ -45,29 +49,32 @@ def answer_status(sample: dict, version: dict) -> dict:
         if got != want:
             problems.append("列出的違規與實際違規不符")
     else:
-        pipes = data.get("fixed_pipes")
-        fixed = apply_fix(scene, pipes) if isinstance(pipes, list) else None
+        pipes, openings = data.get("fixed_pipes"), data.get("new_openings", [])
+        fixed = apply_fix(scene, pipes, openings) if isinstance(pipes, list) else None
         if fixed is None:
-            problems.append("fixed_pipes 格式錯誤或含不存在的管線")
+            problems.append("fixed_pipes / new_openings 格式錯誤，或含不存在的元件、不允許開口的牆")
         else:
             left = check_all(fixed)
             if left:
                 problems.append(f"答案套用後仍有 {len(left)} 項違規")
-            stale = canonical(pipes) != canonical(version["fixed_pipes"])
+            stale = canonical(pipes) != canonical(version["fixed_pipes"]) or canonical_openings(
+                openings
+            ) != canonical_openings(version.get("new_openings", []))
             if stale:
                 problems.append("文字內的答案與目前修正不一致（請重新產生文字）")
     return {"ok": not problems, "problems": problems, "stale": stale}
 
 
 def figure_json(sample: dict, fixed_pipes: list[dict], highlight: list[str] | None = None,
-                blind: bool = False) -> tuple[dict, list[dict]]:
+                blind: bool = False, new_openings: list[dict] | None = None
+                ) -> tuple[dict, list[dict]]:
     scene = Scene.from_dict(sample["scene"])
     if blind:  # quiz: the bare scene, no markers, counts or dimensions
         fig = build_figure(scene, [], scene, [], set(), title=sample["id"], blind=True)
         return json.loads(fig.to_json()), []
-    fixed = apply_fix(scene, fixed_pipes)
+    fixed = apply_fix(scene, fixed_pipes, new_openings)
     if fixed is None:
-        raise ValueError("fixed_pipes 格式錯誤或含不存在的管線")
+        raise ValueError("fixed_pipes / new_openings 格式錯誤，或含不存在的元件、不允許開口的牆")
     before, after = check_all(scene), check_all(fixed)
     moved = set(highlight) if highlight is not None else {p["id"] for p in fixed_pipes}
     fig = build_figure(scene, before, fixed, after, moved, title=sample["id"])
@@ -79,20 +86,28 @@ def replay_steps(sample: dict) -> list[dict]:
     scene = Scene.from_dict(sample["scene"])
     steps = [{
         "step": 0, "text": f"原始場景：共 {len(sample['violations'])} 項違規。",
-        "fixed_pipes": [], "violations": len(sample["violations"]), "highlight": [],
+        "fixed_pipes": [], "new_openings": [], "violations": len(sample["violations"]),
+        "highlight": [],
     }]
-    cur, cum = scene, {}
+    cur, cum, cum_open = scene, {}, []
     for i, a in enumerate(sample.get("actions", []), 1):
         if not a.get("points"):
             return steps[:1]  # sample predates trace points: nothing to replay
         pts = [tuple(q) for q in a["points"]]
         nxt = replace(cur, pipes=[replace(p, points=pts) if p.id == a["pipe_id"] else p
                                   for p in cur.pipes])
+        if a["kind"] == "add_opening":
+            d = a["detail"]
+            cum_open.append({"wall": d["wall"], **{k: d[k] for k in ("u0", "u1", "z0", "z1")}})
+            nxt = apply_fix(nxt, [], [cum_open[-1]])
         why = priority_sentence(cur, a)
         cum[a["pipe_id"]] = pts
         steps.append({
             "step": i, "text": (why + "：" if why else "") + action_text(cur, nxt, a) + "。",
-            "fixed_pipes": [{"id": k, "points": [list(q) for q in v]} for k, v in cum.items()],
+            # same rule as the answer: only pipes whose path differs from the original
+            "fixed_pipes": [{"id": k, "points": [list(q) for q in v]} for k, v in cum.items()
+                            if [tuple(q) for q in v] != list(scene.pipe(k).points)],
+            "new_openings": list(cum_open),
             "violations": a["violations_after"], "highlight": [a["pipe_id"]],
             "resolved": a["resolved"],
         })
@@ -100,10 +115,11 @@ def replay_steps(sample: dict) -> list[dict]:
     return steps
 
 
-def regenerate_text(sample: dict, fixed_pipes: list[dict]) -> str:
+def regenerate_text(sample: dict, fixed_pipes: list[dict],
+                    new_openings: list[dict] | None = None) -> str:
     """Assistant text for a hand-edited answer (no solver trace, so it describes the result)."""
     scene = Scene.from_dict(sample["scene"])
-    fixed = apply_fix(scene, fixed_pipes)
+    fixed = apply_fix(scene, fixed_pipes, new_openings)
     raw = {
         "id": sample["id"], "seed": sample["seed"], "difficulty": sample["difficulty"],
         "scene_hash": sample["scene_hash"], "scene": sample["scene"],

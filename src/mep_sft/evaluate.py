@@ -49,18 +49,18 @@ def score(sample: dict, output: str, variant: str | None = None) -> dict:
             recall=hit / len(want) if want else 1.0,
         )
         return res
-    pipes = data.get("fixed_pipes")
-    fixed = apply_fix(scene, pipes) if isinstance(pipes, list) else None
+    pipes, openings = data.get("fixed_pipes"), data.get("new_openings", [])
+    fixed = apply_fix(scene, pipes, openings) if isinstance(pipes, list) else None
     if fixed is None:
         return res
     after = check_all(fixed)
     res.update(
-        format_ok=True, passed=not after, changed_pipes=len(pipes),
+        format_ok=True, passed=not after, changed_pipes=len(pipes) + len(openings),
         resolved_ratio=1.0 if not before and not after else
         max(0.0, (len(before) - len(after)) / len(before)) if before else 0.0,
         new_violations=len({(v.type, tuple(v.ids)) for v in after}
                            - {(v.type, tuple(v.ids)) for v in before}),
-        unnecessary_change=not before and bool(pipes),
+        unnecessary_change=not before and bool(pipes or openings),
     )
     return res
 

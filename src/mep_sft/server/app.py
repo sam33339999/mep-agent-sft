@@ -10,7 +10,7 @@ from fastapi.responses import HTMLResponse, PlainTextResponse
 from plotly.offline import get_plotlyjs_version
 from pydantic import BaseModel, Field
 
-from ..answer import apply_fix
+from ..answer import apply_fix, new_openings_payload
 from ..assembler import assemble as assemble_sample
 from ..assembler import fixed_pipes_payload, pick_variant, prompt_messages
 from ..explain import explain
@@ -22,6 +22,7 @@ from .db import Store
 from .logic import (
     answer_status,
     canonical,
+    canonical_openings,
     figure_json,
     regenerate_text,
     replay_steps,
@@ -33,11 +34,13 @@ WEB = Path(__file__).resolve().parents[3] / "web"
 
 class Preview(BaseModel):
     fixed_pipes: list[dict]
+    new_openings: list[dict] = []
     highlight: list[str] | None = None
 
 
 class NewVersion(BaseModel):
     fixed_pipes: list[dict] | None = None
+    new_openings: list[dict] | None = None
     assistant_text: str | None = None
     regenerate_text: bool = True
     note: str = ""
@@ -93,7 +96,7 @@ def create_app(db_path: str = "data/review.db") -> FastAPI:
         versions = store.versions(sample_id)
         cur = versions[-1]
         scene = Scene.from_dict(s["scene"])
-        fixed = apply_fix(scene, cur["fixed_pipes"])
+        fixed = apply_fix(scene, cur["fixed_pipes"], cur["new_openings"])
         msgs = prompt_messages(scene, s["variant"])
         after = [v.to_dict() for v in check_all(fixed)] if fixed else None
         return {
@@ -117,7 +120,7 @@ def create_app(db_path: str = "data/review.db") -> FastAPI:
         v = vs[-1] if version is None else next((x for x in vs if x["version"] == version), None)
         if v is None:
             raise HTTPException(404, "version not found")
-        fig, _ = figure_json(s, v["fixed_pipes"], blind=blind)
+        fig, _ = figure_json(s, v["fixed_pipes"], blind=blind, new_openings=v["new_openings"])
         return fig
 
     @app.get("/api/samples/{sample_id}/steps")
@@ -130,7 +133,8 @@ def create_app(db_path: str = "data/review.db") -> FastAPI:
         if not valid_payload(body.fixed_pipes):
             raise HTTPException(422, "fixed_pipes 格式錯誤")
         try:
-            fig, after = figure_json(s, body.fixed_pipes, body.highlight)
+            fig, after = figure_json(s, body.fixed_pipes, body.highlight,
+                                     new_openings=body.new_openings)
         except ValueError as e:
             raise HTTPException(422, str(e)) from e
         return {"figure": fig, "violations_after": after}
@@ -140,17 +144,20 @@ def create_app(db_path: str = "data/review.db") -> FastAPI:
         s = load(sample_id)
         cur = latest(sample_id)
         pipes = body.fixed_pipes if body.fixed_pipes is not None else cur["fixed_pipes"]
-        if not valid_payload(pipes) or apply_fix(Scene.from_dict(s["scene"]), pipes) is None:
-            raise HTTPException(422, "fixed_pipes 格式錯誤或含不存在的管線")
-        pipes_changed = canonical(pipes) != canonical(cur["fixed_pipes"])
+        openings = body.new_openings if body.new_openings is not None else cur["new_openings"]
+        if not valid_payload(pipes) or apply_fix(Scene.from_dict(s["scene"]), pipes, openings) is None:
+            raise HTTPException(422, "fixed_pipes / new_openings 格式錯誤，或含不存在的元件、不允許開口的牆")
+        pipes_changed = canonical(pipes) != canonical(cur["fixed_pipes"]) or canonical_openings(
+            openings
+        ) != canonical_openings(cur["new_openings"])
         text = cur["assistant_text"]
         if body.assistant_text is not None:
             text = body.assistant_text
         elif pipes_changed and body.regenerate_text and s["variant"] != "detect_only":
-            text = regenerate_text(s, pipes)
+            text = regenerate_text(s, pipes, openings)
         if not pipes_changed and text == cur["assistant_text"]:
             raise HTTPException(400, "沒有任何修改")
-        n = store.add_version(sample_id, pipes, text, "human", body.note)
+        n = store.add_version(sample_id, pipes, text, "human", body.note, openings)
         return {"version": n, "status_check": answer_status(s, latest(sample_id))}
 
     @app.post("/api/samples/{sample_id}/review")
@@ -174,8 +181,10 @@ def create_app(db_path: str = "data/review.db") -> FastAPI:
             variant = pick_variant(raw)
             scene = Scene.from_dict(raw["scene"])
             text = assemble_sample(raw, variant)["messages"][2]["content"]
-            pipes = fixed_pipes_payload(scene, Scene.from_dict(raw["fixed"]))
-            added += store.add_sample(raw, variant, pipes, text)
+            fixed_scene = Scene.from_dict(raw["fixed"])
+            pipes = fixed_pipes_payload(scene, fixed_scene)
+            added += store.add_sample(raw, variant, pipes, text,
+                                      new_openings_payload(scene, fixed_scene))
         return {"added": added, "duplicates": len(samples) - added,
                 "attempts": {d: st.attempts for d, st in stats.items() if st.attempts}}
 

@@ -111,9 +111,10 @@ def test_solver_slides_pipe_into_opening():
     assert [(a.kind, a.detail) for a in res.actions] == [("slide_wall", {"dx": 1.05, "dy": 0.0})]
 
 
-def test_solid_wall_is_unsolvable():
+def test_structural_wall_with_fixed_pipe_is_unsolvable():
     s = opening()
     s.walls[0].openings = []
+    s.walls[0].allow_openings = False  # structural: no new sleeve may be requested
     s.pipe("C").fixed_ends = True  # cannot slide to the other side of the wall
     res = solve(s)
     assert not res.ok and [v.type for v in res.remaining] == [WALL]
@@ -165,3 +166,27 @@ def test_trim_is_refused_when_too_little_pipe_would_remain():
     )
     res = solve(s)
     assert res.ok and res.actions[0].kind != "trim"  # 0.4 m would remain, below the 0.5 m floor
+
+
+def test_fixed_pipe_through_a_wall_gets_a_new_opening():
+    s = opening()
+    s.walls[0].openings = []
+    s.pipe("C").fixed_ends = True
+    res = solve(s)
+    assert res.ok and [a.kind for a in res.actions] == ["add_opening"]
+    assert res.fixed.pipe("C").points == s.pipe("C").points  # the pipe itself is untouched
+    (o,) = res.fixed.walls[0].openings
+    # pipe crosses at u=3, z=2.5, outer radius 0.05; opening keeps a 0.1 m margin, grid-snapped
+    assert (o.u0, o.u1, o.z0, o.z1) == (2.85, 3.15, 2.35, 2.65)
+    assert res.actions[0].detail["wall"] == "W1"
+
+
+def test_new_opening_never_overlaps_an_existing_one():
+    s = opening()
+    s.walls[0].openings = [Opening(2.9, 3.1, 0.0, 2.0)]  # a door right beside where the pipe passes
+    s.pipe("C").fixed_ends = True
+    res = solve(s)
+    assert res.ok
+    ops = res.fixed.walls[0].openings
+    assert all(not (a.u0 < b.u1 and b.u0 < a.u1 and a.z0 < b.z1 and b.z0 < a.z1)
+               for i, a in enumerate(ops) for b in ops[i + 1:])
