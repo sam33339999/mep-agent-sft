@@ -102,3 +102,20 @@ def test_demo_cli_case(case, tmp_path):
     from mep_sft.cli import main
     assert main(["demo", "--case", case, "--out", str(tmp_path)]) == 0
     assert (tmp_path / "scene.html").exists()
+
+
+def test_plan_view_is_split_per_storey_with_global_marker_numbers():
+    from mep_sft.viz_plotly import build_figure
+
+    s = two_floors()
+    fig = build_figure(s, check_all(s), solve(s).fixed, [], {"C"})
+    titles = [a.text for a in fig.layout.annotations if a.text and "平面圖" in a.text]
+    assert any("1F" in t for t in titles) and any("2F" in t for t in titles)
+    # 2D text traces: (y axis, labels). Each storey's plan lists only its own pipe.
+    texts = [(t.yaxis, set(t.text)) for t in fig.data
+             if getattr(t, "mode", None) == "text" and t.text and set(t.text) <= {"A", "C"}]
+    assert {frozenset(v) for _, v in texts} == {frozenset({"A"}), frozenset({"C"})}
+    # the one violation is marker 1 and appears on exactly one plan (the 2F one)
+    marks = [t for t in fig.data if getattr(t, "mode", None) == "markers+text"
+             and tuple(t.text) == ("①",) and t.type == "scatter"]
+    assert len(marks) == 1

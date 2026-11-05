@@ -292,9 +292,23 @@ def _style_section(fig, scene, watch, labels, view, row, col):
         )
 
 
-def _plan_traces(scene: Scene, watch: list[Violation], moved: set[str]):
+def _on_floor(scene: Scene, floor: int | None):
+    """(walls, pipes) of one storey; everything when floor is None."""
+    if floor is None:
+        return scene.walls, scene.pipes
+    z0 = scene.rules.z0(floor)
+    return ([w for w in scene.walls if abs(w.z0 - z0) < 1e-6],
+            [p for p in scene.pipes if p.floor == floor])
+
+
+def _loc_floor(scene: Scene, v: Violation) -> int:
+    return min(max(int(v.location[2] // scene.rules.floor_pitch), 0), scene.rules.floors - 1)
+
+
+def _plan_traces(scene: Scene, watch: list[Violation], moved: set[str], floor: int | None = None):
     traces = []
-    for w in scene.walls:
+    walls, pipes = _on_floor(scene, floor)
+    for w in walls:
         base = _wall_base(w)
         traces.append(_fill([c[0] for c in base], [c[1] for c in base], "#bbbbbb", f"wall {w.id}",
                             f"wall {w.id}", opacity=0.7))
@@ -305,26 +319,27 @@ def _plan_traces(scene: Scene, watch: list[Violation], moved: set[str]):
                 line={"color": "#ff7f0e", "width": 6}, hovertext=f"{w.id} 開口", hoverinfo="text",
                 showlegend=False,
             ))
-    for p in scene.pipes:
+    for p in pipes:
         traces += _pipe_shapes(p, "xy", _pipe_color(p, p.id in moved), opacity=0.8)
-    if watch:
+    # numbers are the violation's position in the full list, so they match every other view
+    marks = [(i, v) for i, v in enumerate(watch) if floor is None or _loc_floor(scene, v) == floor]
+    if marks:
         traces.append(go.Scatter(
-            x=[v.location[0] for v in watch], y=[v.location[1] for v in watch],
-            mode="markers+text", text=[num(i) for i in range(len(watch))],
+            x=[v.location[0] for _, v in marks], y=[v.location[1] for _, v in marks],
+            mode="markers+text", text=[num(i) for i, _ in marks],
             textposition="top right", textfont={"color": BAD, "size": 15},
             marker={"size": 11, "color": BAD, "symbol": "diamond"},
-            hovertext=[v.message for v in watch], hoverinfo="text", showlegend=False,
+            hovertext=[v.message for _, v in marks], hoverinfo="text", showlegend=False,
         ))
     return traces
 
 
-def _style_plan(fig, scene: Scene, row: int, col: int):
+def _style_plan(fig, scene: Scene, row: int, col: int, floor: int | None = None):
     sp = fig.get_subplot(row, col)
     xa = sp.xaxis.plotly_name.replace("axis", "")
-    xs = [c[0] for w in scene.walls for c in _wall_base(w)] + [
-        pt[0] for p in scene.pipes for pt in p.points]
-    ys = [c[1] for w in scene.walls for c in _wall_base(w)] + [
-        pt[1] for p in scene.pipes for pt in p.points]
+    walls, pipes = _on_floor(scene, floor)
+    xs = [c[0] for w in walls for c in _wall_base(w)] + [pt[0] for p in pipes for pt in p.points]
+    ys = [c[1] for w in walls for c in _wall_base(w)] + [pt[1] for p in pipes for pt in p.points]
     fig.update_xaxes(range=[min(xs) - 0.5, max(xs) + 0.5], title_text="X (m)", row=row, col=col)
     fig.update_yaxes(range=[min(ys) - 0.5, max(ys) + 0.5], title_text="Y (m)", scaleanchor=xa,
                      scaleratio=1, row=row, col=col)
@@ -335,27 +350,35 @@ def build_figure(
     after: Scene, after_violations: list[Violation],
     moved: set[str], title: str = "MEP 修正前後", blind: bool = False,
 ) -> go.Figure:
-    """Rows: 3D, plan, elevation along Y, elevation along X; columns: before / after.
+    """Rows: 3D, one plan per storey, elevation along Y, elevation along X; columns: before / after.
 
     blind=True hides every hint (counts, markers, dimensions) for the quiz mode: the caller
     passes empty violation lists and the titles stop saying what is wrong.
     """
+    floors = before.rules.floors
     s3d, xy = {"type": "scene"}, {"type": "xy"}
+    tag = (lambda k: f" {k + 1}F") if floors > 1 else (lambda k: "")
     if blind:
-        titles = ("3D 立體圖", "3D 立體圖（同左）", "平面圖（從上往下看）", "平面圖（同左）",
-                  "立面圖（沿 Y 看）", "立面圖（同左）", "立面圖（沿 X 看）", "立面圖（同左）")
+        titles = ["3D 立體圖", "3D 立體圖（同左）"]
+        for k in range(floors):
+            titles += [f"平面圖{tag(k)}（從上往下看）", f"平面圖{tag(k)}（同左）"]
+        titles += ["立面圖（沿 Y 看）", "立面圖（同左）", "立面圖（沿 X 看）", "立面圖（同左）"]
     else:
-        titles = (
+        titles = [
             f"3D 修正前（違規 {len(before_violations)}）",
             f"3D 修正後（違規 {len(after_violations)}；綠色＝被移動）",
-            "平面圖（從上往下看）修正前", "平面圖 修正後",
-            "立面圖（沿 Y 看）修正前", "立面圖（沿 Y 看）修正後",
-            "立面圖（沿 X 看）修正前", "立面圖（沿 X 看）修正後",
-        )
+        ]
+        for k in range(floors):
+            titles += [f"平面圖{tag(k)}（從上往下看）修正前", f"平面圖{tag(k)} 修正後"]
+        titles += ["立面圖（沿 Y 看）修正前", "立面圖（沿 Y 看）修正後",
+                   "立面圖（沿 X 看）修正前", "立面圖（沿 X 看）修正後"]
+    n_rows = 1 + floors + 2
+    heights = [0.34] + [0.26 / floors] * floors + [0.2, 0.2]
     fig = make_subplots(
-        rows=4, cols=2, row_heights=[0.34, 0.26, 0.2, 0.2], vertical_spacing=0.05,
-        specs=[[s3d, s3d], [xy, xy], [xy, xy], [xy, xy]], subplot_titles=titles,
+        rows=n_rows, cols=2, row_heights=heights, vertical_spacing=0.04,
+        specs=[[s3d, s3d]] + [[xy, xy]] * (n_rows - 1), subplot_titles=titles,
     )
+    elev_rows = ((2 + floors, "xz"), (3 + floors, "yz"))
     for col, (scene, vs, mv) in enumerate(
         ((before, before_violations, set()), (after, after_violations, moved)), start=1
     ):
@@ -368,11 +391,11 @@ def build_figure(
                 fig.add_trace(t, row=1, col=col)
         if vs:
             fig.add_trace(_violation_trace(vs), row=1, col=col)
-        # plan markers: the violations of this very scene, numbered like the "before" list
-        for t in _plan_traces(scene, vs if col == 1 else [], mv):
-            fig.add_trace(t, row=2, col=col)
-        _style_plan(fig, scene, 2, col)
-        for row, view in ((3, "xz"), (4, "yz")):
+        for k in range(floors):  # one plan per storey; markers numbered like the "before" list
+            for t in _plan_traces(scene, vs if col == 1 else [], mv, k):
+                fig.add_trace(t, row=2 + k, col=col)
+            _style_plan(fig, scene, 2 + k, col, k)
+        for row, view in elev_rows:
             # dimensions track the originally-violating measurements, so "after" shows them passing
             traces, labels = _section_traces(scene, before_violations, view, mv)
             for t in traces:
@@ -386,7 +409,8 @@ def build_figure(
                 "camera": {"eye": {"x": 1.4, "y": -1.6, "z": 0.7}},
             }
         })
-    fig.update_layout(title=title, height=1900, margin={"l": 40, "r": 20, "t": 70, "b": 30})
+    fig.update_layout(title=title, height=1500 + 400 * floors,
+                      margin={"l": 40, "r": 20, "t": 70, "b": 30})
     return fig
 
 
