@@ -43,6 +43,10 @@ class Action:
     resolved: str  # message of the violation that triggered it
     violations_before: int
     violations_after: int
+    vtype: str = ""  # type of the violation that triggered it
+    ids: list[str] = field(default_factory=list)  # elements involved in that violation
+    # strategies passed over first: {"pipe_id", "strategy", "reason": fixed_ends | no_improvement}
+    skipped: list[dict] = field(default_factory=list)
 
 
 @dataclass
@@ -144,14 +148,21 @@ def _reslope(p: Pipe, v: Violation, scene: Scene):
     """Keep the upstream end and lower the downstream end, or keep the downstream end and raise
     the upstream end. Vertical drops are left untouched."""
     pts = p.points
+    max_slope = scene.rules.max_drain_slope
+
+    def fall(run: float) -> float:
+        """Drop over `run` metres: on the 0.05 grid when that keeps the slope legal."""
+        snapped = _snap_up(TARGET_SLOPE * run)
+        return snapped if snapped <= max_slope * run else TARGET_SLOPE * run
+
     down, up = [pts[0]], [pts[-1]]
     for a, b in pairwise(pts):
         run = math.hypot(b[0] - a[0], b[1] - a[1])
-        drop = TARGET_SLOPE * run if run >= 1e-6 else a[2] - b[2]
+        drop = fall(run) if run >= 1e-6 else a[2] - b[2]
         down.append((b[0], b[1], r4(down[-1][2] - drop)))
     for up_pt, down_pt in reversed(list(pairwise(pts))):
         run = math.hypot(down_pt[0] - up_pt[0], down_pt[1] - up_pt[1])
-        rise = TARGET_SLOPE * run if run >= 1e-6 else up_pt[2] - down_pt[2]
+        rise = fall(run) if run >= 1e-6 else up_pt[2] - down_pt[2]
         up.append((up_pt[0], up_pt[1], r4(up[-1][2] + rise)))
     yield {"mode": "lower_downstream", "slope": TARGET_SLOPE}, down
     yield {"mode": "raise_upstream", "slope": TARGET_SLOPE}, list(reversed(up))
@@ -193,15 +204,21 @@ def solve(scene: Scene, max_iter: int = 30) -> SolveResult:
         if not vs:
             return SolveResult(True, cur, actions)
         target = vs[0]
+        skipped: list[dict] = []
         for pid in _movers(cur, target):
             hit = None
             for strategy in LADDER[target.type]:
                 if cur.pipe(pid).fixed_ends and strategy in MOVES_ENDS:
+                    skipped.append({"pipe_id": pid, "strategy": strategy, "reason": "fixed_ends"})
                     continue
                 hit = _best(cur, pid, strategy, target, len(vs))
                 if hit:
-                    actions.append(Action(strategy, pid, hit[1], target.message, len(vs), hit[0]))
+                    actions.append(
+                        Action(strategy, pid, hit[1], target.message, len(vs), hit[0],
+                               target.type, list(target.ids), skipped)
+                    )
                     break
+                skipped.append({"pipe_id": pid, "strategy": strategy, "reason": "no_improvement"})
             if hit:
                 cur = hit[2]
                 break

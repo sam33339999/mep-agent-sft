@@ -4,6 +4,7 @@ import argparse
 import json
 from pathlib import Path
 
+from .assembler import assemble_file
 from .demo import CASES, demo_scene
 from .generator import generate_dataset
 from .rules import check_all
@@ -51,6 +52,12 @@ def cmd_generate(args) -> int:
     return 0 if len(samples) == args.n else 1
 
 
+def cmd_assemble(args) -> int:
+    n = assemble_file(Path(args.raw), Path(args.out), include_meta=not args.no_meta)
+    print(f"組裝 {n} 筆 -> {args.out}")
+    return 0
+
+
 def main(argv=None) -> int:
     ap = argparse.ArgumentParser(prog="mep_sft")
     sub = ap.add_subparsers(dest="cmd", required=True)
@@ -64,6 +71,11 @@ def main(argv=None) -> int:
     g.add_argument("--difficulty", type=int, choices=[1, 2, 3, 4], default=None)
     g.add_argument("--out", default="data/raw.jsonl")
     g.set_defaults(fn=cmd_generate)
+    a = sub.add_parser("assemble", help="raw JSONL -> 訓練用 JSONL")
+    a.add_argument("--raw", default="data/raw.jsonl")
+    a.add_argument("--out", default="data/train.jsonl")
+    a.add_argument("--no-meta", action="store_true", help="輸出只含 messages")
+    a.set_defaults(fn=cmd_assemble)
     args = ap.parse_args(argv)
     return args.fn(args)
 
