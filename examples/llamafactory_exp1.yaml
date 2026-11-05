@@ -1,0 +1,34 @@
+# Experiment 1: 700 training samples, Qwen3-0.6B + LoRA r32, 3 epochs, RTX 3090 (~19 min).
+#   uv run python -m mep_sft generate --n 700 --seed 20000 --out data/exp1/train_raw.jsonl
+#   uv run python -m mep_sft generate --n 100 --seed 90000 --out data/exp1/val_raw.jsonl   # held out
+#   uv run python -m mep_sft assemble --raw data/exp1/train_raw.jsonl --out data/exp1/train.jsonl
+#   uv run python -m mep_sft validate --train data/exp1/train.jsonl --dataset-info data/exp1/dataset_info.json
+#   llamafactory-cli train examples/llamafactory_exp1.yaml
+#   python examples/generate_answers.py --raw data/exp1/val_raw.jsonl --out preds.jsonl --adapter data/exp1/lora
+#   uv run python -m mep_sft eval --raw data/exp1/val_raw.jsonl --pred preds.jsonl
+# batch 1 x accumulation 8: batch 4 runs out of 24 GB (151k-token vocabulary logits at ~3000 tokens).
+model_name_or_path: Qwen/Qwen3-0.6B
+stage: sft
+do_train: true
+finetuning_type: lora
+lora_target: all
+lora_rank: 32
+lora_alpha: 64
+dataset: mep_sft
+dataset_dir: data/exp1             # train.jsonl + dataset_info.json (see steps below)
+template: qwen3
+cutoff_len: 4096
+overwrite_cache: true
+preprocessing_num_workers: 4
+output_dir: data/exp1/lora
+overwrite_output_dir: data/exp1/lora
+per_device_train_batch_size: 1
+gradient_accumulation_steps: 8
+learning_rate: 2.0e-4
+num_train_epochs: 3
+lr_scheduler_type: cosine
+warmup_ratio: 0.05
+logging_steps: 10
+save_steps: 100000
+report_to: none
+bf16: true
