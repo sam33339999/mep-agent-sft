@@ -17,6 +17,16 @@ def r4(x: float) -> float:
 
 
 @dataclass
+class Opening:
+    """Rectangular hole in a wall: u0..u1 measured along the wall from p0, z0..z1 absolute."""
+
+    u0: float
+    u1: float
+    z0: float
+    z1: float
+
+
+@dataclass
 class Wall:
     id: str
     p0: tuple[float, float]
@@ -24,6 +34,7 @@ class Wall:
     thickness: float = 0.2
     height: float = 3.0
     z0: float = 0.0
+    openings: list[Opening] = field(default_factory=list)
 
 
 @dataclass
@@ -33,6 +44,7 @@ class Pipe:
     diameter: float
     points: list[Vec]
     insulation: float = 0.0
+    fixed_ends: bool = False  # ends are tied to equipment: may be detoured, never moved rigidly
 
     @property
     def outer_radius(self) -> float:
@@ -44,6 +56,8 @@ class Rules:
     ceiling_height: float = 3.0
     min_clear_height: float = 2.4  # underside of any pipe must be >= this
     clearance: float = 0.05  # minimum gap between two pipe outer surfaces
+    min_drain_slope: float = 0.01  # drainage falls from points[0] to points[-1]
+    max_drain_slope: float = 0.10
 
 
 @dataclass
@@ -69,7 +83,13 @@ class Scene:
         if d.get("schema_version") != SCHEMA_VERSION:
             raise ValueError(f"unsupported schema_version {d.get('schema_version')}")
         return cls(
-            walls=[Wall(**{**w, "p0": tuple(w["p0"]), "p1": tuple(w["p1"])}) for w in d["walls"]],
+            walls=[
+                Wall(**{
+                    **w, "p0": tuple(w["p0"]), "p1": tuple(w["p1"]),
+                    "openings": [Opening(**o) for o in w.get("openings", [])],
+                })
+                for w in d["walls"]
+            ],
             pipes=[Pipe(**{**p, "points": [tuple(pt) for pt in p["points"]]}) for p in d["pipes"]],
             rules=Rules(**d["rules"]),
             injected=list(d.get("injected", [])),

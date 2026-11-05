@@ -93,6 +93,26 @@ def _wall_trace(w: Wall):
     )
 
 
+def _opening_corners(w: Wall, o) -> list[tuple[float, float, float]]:
+    """Opening rectangle on the wall mid-plane, world coordinates."""
+    dx, dy = w.p1[0] - w.p0[0], w.p1[1] - w.p0[1]
+    L = math.hypot(dx, dy)
+    pt = lambda u, z: (w.p0[0] + dx / L * u, w.p0[1] + dy / L * u, z)
+    return [pt(o.u0, o.z0), pt(o.u1, o.z0), pt(o.u1, o.z1), pt(o.u0, o.z1)]
+
+
+def _opening_traces_3d(w: Wall):
+    out = []
+    for o in w.openings:
+        c = _opening_corners(w, o)
+        c.append(c[0])
+        out.append(go.Scatter3d(
+            x=[q[0] for q in c], y=[q[1] for q in c], z=[q[2] for q in c], mode="lines",
+            line={"color": "#ff7f0e", "width": 5}, name="開口", hoverinfo="name", showlegend=False,
+        ))
+    return out
+
+
 def _violation_trace(vs: list[Violation]):
     return go.Scatter3d(
         x=[v.location[0] for v in vs], y=[v.location[1] for v in vs],
@@ -192,7 +212,15 @@ def _dimension(scene: Scene, v: Violation, view: str) -> tuple[list, tuple[str, 
 
 def _section_traces(scene: Scene, watch: list[Violation], view: str, moved: set[str]):
     """Returns (traces, dimension labels)."""
-    traces = [_wall_shape(w, view) for w in scene.walls]
+    traces = []
+    for w in scene.walls:
+        traces.append(_wall_shape(w, view))
+        for o in w.openings:
+            c = _opening_corners(w, o)
+            hs = [q[VIEWS[view][0]] for q in c]
+            if max(hs) - min(hs) > 1e-6:  # edge-on openings have no width in this view
+                traces.append(_fill([min(hs), max(hs), max(hs), min(hs)], [o.z0, o.z0, o.z1, o.z1],
+                                    "#ffffff", f"opening {w.id}", f"{w.id} 開口"))
     for p in scene.pipes:
         traces += _pipe_shapes(p, view, _pipe_color(p, p.id in moved))
     labels = []
@@ -265,6 +293,8 @@ def render_before_after(
     ):
         for w in scene.walls:
             fig.add_trace(_wall_trace(w), row=1, col=col)
+            for t in _opening_traces_3d(w):
+                fig.add_trace(t, row=1, col=col)
         for p in scene.pipes:
             for t in _pipe_traces(p, p.id in mv, show_legend=(col == 2)):
                 fig.add_trace(t, row=1, col=col)
@@ -278,7 +308,11 @@ def render_before_after(
             _style_section(fig, scene, before_violations, labels, view, row, col)
     for name in ("scene", "scene2"):
         fig.update_layout(**{
-            name: {"aspectmode": "data", "zaxis": {"range": [0, before.rules.ceiling_height + 0.2]}}
+            name: {
+                "aspectmode": "data",
+                "zaxis": {"range": [0, before.rules.ceiling_height + 0.2]},
+                "camera": {"eye": {"x": 1.4, "y": -1.6, "z": 0.7}},
+            }
         })
     fig.update_layout(title=title, height=1500, margin={"l": 40, "r": 20, "t": 70, "b": 30})
     fig.write_html(out_path, include_plotlyjs="cdn")

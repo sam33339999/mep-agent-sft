@@ -11,6 +11,7 @@ from .scene import Pipe, Scene, Wall, r4
 CLASH = "clash"
 WALL = "wall_penetration"
 CLEAR = "clear_height"
+SLOPE = "drain_slope"
 
 
 @dataclass
@@ -76,9 +77,16 @@ def check_walls(scene: Scene) -> list[Violation]:
             lo = (0.0, -w.thickness / 2 - r, w.z0 - r)
             hi = (length, w.thickness / 2 + r, w.z0 + w.height + r)
             for a, b in _segments(p):
-                hit = segment_box_intersect(_wall_local(w, a), _wall_local(w, b), lo, hi)
+                la, lb = _wall_local(w, a), _wall_local(w, b)
+                hit = segment_box_intersect(la, lb, lo, hi)
                 if hit:
                     t = (hit[0] + hit[1]) / 2
+                    cx = tuple(la[i] + (lb[i] - la[i]) * t for i in range(3))
+                    if any(
+                        o.u0 + r <= cx[0] <= o.u1 - r and o.z0 + r <= cx[2] <= o.z1 - r
+                        for o in w.openings
+                    ):
+                        continue  # passes cleanly through an opening
                     loc = tuple(r4(a[i] + (b[i] - a[i]) * t) for i in range(3))
                     out.append(
                         Violation(
@@ -116,6 +124,33 @@ def check_clear_height(scene: Scene) -> list[Violation]:
     return out
 
 
+def check_slopes(scene: Scene) -> list[Violation]:
+    out = []
+    lo, hi = scene.rules.min_drain_slope, scene.rules.max_drain_slope
+    for p in scene.pipes:
+        if p.system != "drainage":
+            continue
+        for a, b in _segments(p):
+            run = math.hypot(b[0] - a[0], b[1] - a[1])
+            if run < 1e-6:  # vertical drop, no slope to check
+                continue
+            slope = (a[2] - b[2]) / run
+            if slope < lo - 1e-9 or slope > hi + 1e-9:
+                bound = lo if slope < lo else hi
+                loc = tuple(r4((u + v) / 2) for u, v in zip(a, b, strict=True))
+                out.append(
+                    Violation(
+                        SLOPE, [p.id], r4(slope), bound, loc,
+                        f"{p.id} 坡度 {r4(slope * 100)}%，不符合要求"
+                        f" {r4(lo * 100)}%~{r4(hi * 100)}%",
+                    )
+                )
+                break
+    return out
+
+
 def check_all(scene: Scene) -> list[Violation]:
-    vs = check_clashes(scene) + check_walls(scene) + check_clear_height(scene)
+    vs = (
+        check_clashes(scene) + check_walls(scene) + check_clear_height(scene) + check_slopes(scene)
+    )
     return sorted(vs, key=lambda v: (v.type, v.ids))

@@ -4,7 +4,7 @@ import argparse
 import json
 from pathlib import Path
 
-from .demo import demo_scene
+from .demo import CASES, demo_scene
 from .rules import check_all
 from .solver import solve
 from .viz_plotly import render_before_after
@@ -13,7 +13,7 @@ from .viz_plotly import render_before_after
 def cmd_demo(args) -> int:
     out = Path(args.out)
     out.mkdir(parents=True, exist_ok=True)
-    scene = demo_scene()
+    scene = demo_scene(args.case)
     before = check_all(scene)
     res = solve(scene)
     after = check_all(res.fixed)
@@ -28,7 +28,9 @@ def cmd_demo(args) -> int:
                         str(out / "scene.html"))
     print(f"違規 {len(before)} -> {len(after)}；solver {'成功' if res.ok else '失敗'}")
     for a in res.actions:
-        print(f"  {a.pipe_id} 垂直位移 {a.dz:+.2f} m（{a.resolved}）")
+        print(f"  {a.pipe_id} {a.kind} {a.detail}（{a.resolved}）")
+    for v in res.remaining:
+        print(f"  未解決：{v.message}")
     print(f"輸出：{out}/scene.html")
     return 0 if res.ok else 1
 
@@ -38,6 +40,7 @@ def main(argv=None) -> int:
     sub = ap.add_subparsers(dest="cmd", required=True)
     d = sub.add_parser("demo", help="跑固定的兩管碰撞範例並輸出 HTML")
     d.add_argument("--out", default="out")
+    d.add_argument("--case", default="two-pipes", choices=sorted(CASES))
     d.set_defaults(fn=cmd_demo)
     args = ap.parse_args(argv)
     return args.fn(args)

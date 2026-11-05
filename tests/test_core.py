@@ -54,7 +54,7 @@ def test_pipe_beside_wall_ok():
 def test_solver_fixes_demo_by_moving_up():
     res = solve(demo_scene())
     assert res.ok and check_all(res.fixed) == []
-    assert [(a.pipe_id, a.dz) for a in res.actions] == [("B", 0.15)]
+    assert [(a.kind, a.pipe_id, a.detail) for a in res.actions] == [("shift_z", "B", {"dz": 0.15})]
 
 
 def test_solver_deterministic():
@@ -65,3 +65,82 @@ def test_solver_deterministic():
 def test_scene_json_roundtrip():
     s = demo_scene()
     assert Scene.from_json(s.to_json()).to_json() == s.to_json()
+
+
+# ---------------------------------------------------------------- phase 2
+
+from mep_sft.demo import jog, opening, slope
+from mep_sft.rules import SLOPE
+from mep_sft.scene import Opening
+
+
+def test_slope_rule():
+    vs = check_all(slope())
+    assert [v.type for v in vs] == [SLOPE]
+    s = slope()
+    s.pipe("D").points = [(1.0, 1.0, 2.6), (6.0, 1.0, 2.5)]  # 2% fall
+    assert check_all(s) == []
+    s.pipe("D").points = [(1.0, 1.0, 2.5), (6.0, 1.0, 2.6)]  # uphill
+    assert [v.type for v in check_all(s)] == [SLOPE]
+
+
+def test_slope_only_applies_to_drainage():
+    s = slope()
+    s.pipe("D").system = "water"
+    assert check_all(s) == []
+
+
+def test_solver_reslope_prefers_raising_upstream_when_lowering_breaks_clear_height():
+    res = solve(slope())
+    assert res.ok and [a.kind for a in res.actions] == ["reslope"]
+    assert res.actions[0].detail["mode"] == "raise_upstream"
+    assert res.fixed.pipe("D").points[0][2] > res.fixed.pipe("D").points[-1][2]
+
+
+def test_wall_opening_allows_pipe():
+    s = opening()
+    s.pipe("C").points = [(4.5, -1.0, 2.5), (4.5, 1.0, 2.5)]
+    assert check_all(s) == []
+    s.pipe("C").points = [(4.99, -1.0, 2.5), (4.99, 1.0, 2.5)]  # pipe edge clips the opening
+    assert [v.type for v in check_all(s)] == [WALL]
+
+
+def test_solver_slides_pipe_into_opening():
+    res = solve(opening())
+    assert res.ok
+    assert [(a.kind, a.detail) for a in res.actions] == [("shift_xy", {"dx": 1.05, "dy": 0.0})]
+
+
+def test_solid_wall_is_unsolvable():
+    s = opening()
+    s.walls[0].openings = []
+    s.pipe("C").fixed_ends = True  # cannot slide to the other side of the wall
+    res = solve(s)
+    assert not res.ok and [v.type for v in res.remaining] == [WALL]
+
+
+def test_fixed_ends_forces_detour_and_keeps_ends():
+    s = jog()
+    res = solve(s)
+    assert res.ok and check_all(res.fixed) == []
+    assert [a.kind for a in res.actions] == ["jog_xy"]
+    old, new = s.pipe("B").points, res.fixed.pipe("B").points
+    assert new[0] == old[0] and new[-1] == old[-1] and len(new) == 6
+
+
+def test_drainage_keeps_priority_over_water():
+    s = Scene(
+        walls=[],
+        pipes=[
+            Pipe("W", "water", 0.1, [(0.0, 1.0, 2.6), (4.0, 1.0, 2.6)]),
+            Pipe("D", "drainage", 0.1, [(2.0, -1.0, 2.62), (2.0, 3.0, 2.58)]),
+        ],
+    )
+    # D has 0.02 m fall over 4 m = 0.5% -> also a slope violation; water must be the one to move
+    res = solve(s)
+    assert "W" in {a.pipe_id for a in res.actions if a.kind != "reslope"}
+
+
+def test_wall_openings_json_roundtrip():
+    s = opening()
+    assert Scene.from_json(s.to_json()).walls[0].openings == [Opening(4.0, 5.0, 0.0, 2.6)]

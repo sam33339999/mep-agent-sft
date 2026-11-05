@@ -1,23 +1,45 @@
-"""Deterministic solver. Phase 1: vertical shift only (later: lateral shift, dogleg detours)."""
+"""Deterministic solver.
+
+Strategy ladder per violation, for the lowest-priority pipe involved first:
+rigid vertical shift -> rigid lateral shift -> vertical jog -> lateral jog; drainage slope errors
+use re-sloping. A candidate is accepted only if it strictly lowers the total violation count,
+so the loop terminates and the result is always re-verified by the same rules.
+"""
 
 from __future__ import annotations
 
 import copy
-from dataclasses import dataclass, field
+import math
+from dataclasses import dataclass, field, replace
+from itertools import pairwise
 
-from .rules import Violation, check_all
-from .scene import SYSTEM_PRIORITY, Scene, r4
+from .rules import CLASH, CLEAR, SLOPE, WALL, Violation, check_all
+from .scene import SYSTEM_PRIORITY, Pipe, Scene, r4
 
 STEP = 0.05
 MAX_SHIFT = 1.5
-# smallest |dz| first; on ties prefer moving up
-CANDIDATES = [s * k * STEP for k in range(1, int(MAX_SHIFT / STEP) + 1) for s in (1, -1)]
+MAX_JOG = 1.0
+TARGET_SLOPE = 0.02
+
+
+def _ladder(max_mag: float) -> list[float]:
+    return [s * k * STEP for k in range(1, round(max_mag / STEP) + 1) for s in (1, -1)]
+
+
+SHIFT_Z = _ladder(MAX_SHIFT)  # smallest |dz| first; ties prefer up
+JOG_OFFSETS = _ladder(MAX_JOG)
+SHIFT_XY = [
+    (sx * k * STEP, sy * k * STEP)
+    for k in range(1, round(MAX_SHIFT / STEP) + 1)
+    for sx, sy in ((1, 0), (-1, 0), (0, 1), (0, -1))
+]
 
 
 @dataclass
 class Action:
+    kind: str  # shift_z | shift_xy | jog_z | jog_xy | reslope
     pipe_id: str
-    dz: float
+    detail: dict
     resolved: str  # message of the violation that triggered it
     violations_before: int
     violations_after: int
@@ -31,11 +53,13 @@ class SolveResult:
     remaining: list[Violation] = field(default_factory=list)
 
 
-def _shifted(scene: Scene, pipe_id: str, dz: float) -> Scene:
-    s = copy.deepcopy(scene)
-    p = s.pipe(pipe_id)
-    p.points = [(x, y, r4(z + dz)) for x, y, z in p.points]
-    return s
+def _with_points(scene: Scene, pid: str, pts: list) -> Scene:
+    pipes = [replace(p, points=pts) if p.id == pid else p for p in scene.pipes]
+    return replace(scene, pipes=pipes)
+
+
+def _snap_up(x: float) -> float:
+    return math.ceil(x / STEP - 1e-9) * STEP
 
 
 def _movers(scene: Scene, v: Violation) -> list[str]:
@@ -44,7 +68,124 @@ def _movers(scene: Scene, v: Violation) -> list[str]:
     return sorted(ids, key=lambda i: (-SYSTEM_PRIORITY[scene.pipe(i).system], i))
 
 
-def solve(scene: Scene, max_iter: int = 20) -> SolveResult:
+# ------------------------------------------------------------------ candidate generators
+# Each yields (detail, new_points) in a fixed order: smallest change first.
+
+def _shift_z(p: Pipe, v: Violation, scene: Scene):
+    for dz in SHIFT_Z:
+        yield {"dz": r4(dz)}, [(x, y, r4(z + dz)) for x, y, z in p.points]
+
+
+def _shift_xy(p: Pipe, v: Violation, scene: Scene):
+    for dx, dy in SHIFT_XY:
+        yield {"dx": r4(dx), "dy": r4(dy)}, [(r4(x + dx), r4(y + dy), z) for x, y, z in p.points]
+
+
+def _nearest_segment(p: Pipe, loc) -> tuple[int, float]:
+    best = None
+    for i, (a, b) in enumerate(zip(p.points[:-1], p.points[1:], strict=True)):
+        d = [b[k] - a[k] for k in range(3)]
+        dd = sum(c * c for c in d)
+        t = 0.0 if dd == 0 else max(0.0, min(1.0, sum((loc[k] - a[k]) * d[k] for k in range(3)) / dd))
+        dist = math.dist(loc, [a[k] + d[k] * t for k in range(3)])
+        if best is None or dist < best[0] - 1e-9:
+            best = (dist, i, t * math.sqrt(dd))
+    return best[1], best[2]
+
+
+def _jog_half_width(p: Pipe, v: Violation, scene: Scene) -> float:
+    if v.type == CLASH:
+        other = scene.pipe(v.ids[1] if v.ids[0] == p.id else v.ids[0])
+        return _snap_up(p.outer_radius + other.outer_radius + scene.rules.clearance + 0.1)
+    if v.type == WALL:
+        wall = next(w for w in scene.walls if w.id == v.ids[1])
+        return _snap_up(wall.thickness / 2 + p.outer_radius + 0.1)
+    return _snap_up(2 * p.outer_radius + 0.1)
+
+
+def _jog(p: Pipe, v: Violation, scene: Scene, axis: str):
+    """Detour around the violation, keeping both pipe ends fixed (45 degree ramps)."""
+    i, s = _nearest_segment(p, v.location)
+    a, b = p.points[i], p.points[i + 1]
+    d = [b[k] - a[k] for k in range(3)]
+    length = math.sqrt(sum(c * c for c in d))
+    u = [c / length for c in d]
+    run = math.hypot(u[0], u[1])
+    if run < 1e-6:  # riser: a sideways/up detour has no meaning
+        return
+    n = (-u[1] / run, u[0] / run, 0.0)
+    s0 = round(s / STEP) * STEP
+    half = _jog_half_width(p, v, scene)
+    for off in JOG_OFFSETS:
+        ramp = abs(off)
+        sa, sb = s0 - half - ramp, s0 + half + ramp
+        if sa < -1e-9 or sb > length + 1e-9:
+            continue
+        ov = (0.0, 0.0, off) if axis == "z" else (n[0] * off, n[1] * off, 0.0)
+
+        def at(t, extra=(0.0, 0.0, 0.0)):
+            return tuple(r4(a[k] + u[k] * t + extra[k]) for k in range(3))
+
+        new = [at(sa), at(s0 - half, ov), at(s0 + half, ov), at(sb)]
+        pts = list(p.points[: i + 1]) + new + list(p.points[i + 1 :])
+        pts = [q for k, q in enumerate(pts) if k == 0 or q != pts[k - 1]]
+        yield {"offset": r4(off), "at": [r4(c) for c in at(s0)], "half_width": r4(half)}, pts
+
+
+def _jog_z(p, v, scene):
+    return _jog(p, v, scene, "z")
+
+
+def _jog_xy(p, v, scene):
+    return _jog(p, v, scene, "xy")
+
+
+def _reslope(p: Pipe, v: Violation, scene: Scene):
+    """Keep the upstream end and lower the downstream end, or keep the downstream end and raise
+    the upstream end. Vertical drops are left untouched."""
+    pts = p.points
+    down, up = [pts[0]], [pts[-1]]
+    for a, b in pairwise(pts):
+        run = math.hypot(b[0] - a[0], b[1] - a[1])
+        drop = TARGET_SLOPE * run if run >= 1e-6 else a[2] - b[2]
+        down.append((b[0], b[1], r4(down[-1][2] - drop)))
+    for up_pt, down_pt in reversed(list(pairwise(pts))):
+        run = math.hypot(down_pt[0] - up_pt[0], down_pt[1] - up_pt[1])
+        rise = TARGET_SLOPE * run if run >= 1e-6 else up_pt[2] - down_pt[2]
+        up.append((up_pt[0], up_pt[1], r4(up[-1][2] + rise)))
+    yield {"mode": "lower_downstream", "slope": TARGET_SLOPE}, down
+    yield {"mode": "raise_upstream", "slope": TARGET_SLOPE}, list(reversed(up))
+
+
+STRATEGIES = {
+    "shift_z": _shift_z, "shift_xy": _shift_xy, "jog_z": _jog_z, "jog_xy": _jog_xy,
+    "reslope": _reslope,
+}
+LADDER = {
+    CLASH: ["shift_z", "shift_xy", "jog_z", "jog_xy"],
+    WALL: ["shift_xy", "shift_z", "jog_xy", "jog_z"],
+    CLEAR: ["shift_z", "jog_z", "shift_xy"],
+    SLOPE: ["reslope"],
+}
+
+
+MOVES_ENDS = {"shift_z", "shift_xy", "reslope"}
+
+
+def _best(scene: Scene, pid: str, strategy: str, v: Violation, count: int):
+    """Smallest change that strictly lowers the violation count, or None."""
+    best = None
+    for detail, pts in STRATEGIES[strategy](scene.pipe(pid), v, scene):
+        cand = _with_points(scene, pid, pts)
+        n = len(check_all(cand))
+        if n < count and (best is None or n < best[0]):
+            best = (n, detail, cand)
+            if n == 0:
+                break
+    return best
+
+
+def solve(scene: Scene, max_iter: int = 30) -> SolveResult:
     cur = copy.deepcopy(scene)
     actions: list[Action] = []
     for _ in range(max_iter):
@@ -52,21 +193,18 @@ def solve(scene: Scene, max_iter: int = 20) -> SolveResult:
         if not vs:
             return SolveResult(True, cur, actions)
         target = vs[0]
-        done = False
         for pid in _movers(cur, target):
-            best = None
-            for dz in CANDIDATES:
-                cand = _shifted(cur, pid, dz)
-                n = len(check_all(cand))
-                if n < len(vs) and (best is None or n < best[0]):
-                    best = (n, dz, cand)
-                    if n == 0:
-                        break
-            if best:
-                actions.append(Action(pid, r4(best[1]), target.message, len(vs), best[0]))
-                cur = best[2]
-                done = True
+            hit = None
+            for strategy in LADDER[target.type]:
+                if cur.pipe(pid).fixed_ends and strategy in MOVES_ENDS:
+                    continue
+                hit = _best(cur, pid, strategy, target, len(vs))
+                if hit:
+                    actions.append(Action(strategy, pid, hit[1], target.message, len(vs), hit[0]))
+                    break
+            if hit:
+                cur = hit[2]
                 break
-        if not done:
+        else:
             return SolveResult(False, cur, actions, vs)
     return SolveResult(False, cur, actions, check_all(cur))
