@@ -72,5 +72,5 @@ sc.display.shading.light = "STUDIO"; sc.display.shading.color_type = "MATERIAL"
 try:
     bpy.ops.render.render(write_still=True)
     print("rendered:", png, flush=True)
-except Exception as e:
+except RuntimeError as e:  # bpy operators raise RuntimeError (e.g. no GL context)
     print("render failed:", type(e).__name__, str(e)[:200], flush=True)
