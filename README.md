@@ -73,4 +73,4 @@ loss 由 1.17 降到 0.30，adapter 正常存檔。**這只證明資料能走完
 - 牆開口只在穿牆中點檢查；斜穿牆可能有誤差。
 - 難度 3、4 的 solver 解出率約 76%、59%；其餘是擁擠到無法收斂的場景，會被丟棄並記錄在統計。
 - 新增牆開口只允許用在標示「可新增開口」的牆（內牆）；外牆視為結構牆，不能新增。
-- IFC 以 ifcopenshell 幾何引擎驗證過座標與開口體積，但未用 BlenderBIM 實際開啟。
+- IFC 已驗證：ifcopenshell 幾何引擎比對座標與開口體積；也用 Bonsai 0.8.4（BlenderBIM 的新版）在 headless Blender 5.0.1 裡以它自己的 `bim.load_project` 載入，牆的開口體積為 5.480 m³（6.0 − 0.52）、管線與兩層樓牆的世界座標包圍盒與場景一致（`examples/bonsai_check.py`）。這是無介面的載入檢查，不是在 Blender 圖形介面裡手動開啟。
