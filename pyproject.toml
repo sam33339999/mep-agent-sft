@@ -3,10 +3,10 @@ name = "mep-sft"
 version = "0.1.0"
 description = "MEP clash-fix SFT data generator"
 requires-python = ">=3.11"
-dependencies = ["plotly>=5.20"]
+dependencies = ["plotly>=5.20", "fastapi>=0.110", "uvicorn>=0.29"]
 
 [project.optional-dependencies]
-dev = ["pytest>=8", "ruff>=0.5"]
+dev = ["pytest>=8", "ruff>=0.5", "httpx>=0.27"]
 
 [build-system]
 requires = ["hatchling"]

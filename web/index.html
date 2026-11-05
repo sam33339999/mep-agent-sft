@@ -1,0 +1,216 @@
+<!doctype html>
+<html lang="zh-Hant">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>MEP 樣本審核</title>
+<script src="https://cdn.plot.ly/plotly-{{PLOTLY_VERSION}}.min.js"></script>
+<style>
+  :root { --bg:#f6f7f9; --panel:#fff; --line:#dde1e7; --text:#1d2430; --mute:#667085;
+          --ok:#1a7f37; --bad:#c62828; --warn:#b26a00; --accent:#1f6feb; }
+  @media (prefers-color-scheme: dark) {
+    :root { --bg:#12161c; --panel:#1b212b; --line:#2e3744; --text:#e6e9ee; --mute:#97a1b0;
+            --ok:#4cc26d; --bad:#ff6b6b; --warn:#f0a93c; --accent:#58a6ff; } }
+  * { box-sizing:border-box; }
+  body { margin:0; background:var(--bg); color:var(--text);
+         font:14px/1.5 system-ui,"Noto Sans TC",sans-serif; }
+  .app { display:grid; grid-template-columns:300px 1fr; height:100vh; }
+  aside { border-right:1px solid var(--line); background:var(--panel); overflow:auto; }
+  main { overflow:auto; padding:16px 20px 40px; }
+  .bar { padding:10px 12px; border-bottom:1px solid var(--line); display:flex; gap:6px;
+         flex-wrap:wrap; align-items:center; }
+  .tabs button { border:1px solid var(--line); background:none; color:var(--text);
+                 padding:3px 10px; border-radius:14px; cursor:pointer; }
+  .tabs button.on { background:var(--accent); color:#fff; border-color:var(--accent); }
+  select, input, textarea, button { font:inherit; color:var(--text); background:var(--panel);
+         border:1px solid var(--line); border-radius:6px; padding:4px 8px; }
+  button { cursor:pointer; } button.primary { background:var(--accent); color:#fff;
+         border-color:var(--accent); } button.good { background:var(--ok); color:#fff;
+         border-color:var(--ok); } button.danger { background:var(--bad); color:#fff;
+         border-color:var(--bad); }
+  .item { padding:8px 12px; border-bottom:1px solid var(--line); cursor:pointer; }
+  .item:hover, .item.sel { background:var(--bg); }
+  .item .t { font-weight:600; } .chip { display:inline-block; font-size:12px; padding:0 7px;
+         border-radius:10px; background:var(--bg); border:1px solid var(--line);
+         color:var(--mute); margin:2px 4px 0 0; }
+  .st-approved { color:var(--ok); } .st-rejected { color:var(--bad); }
+  .st-pending { color:var(--warn); }
+  h2 { margin:0 0 4px; font-size:18px; } h3 { margin:18px 0 6px; font-size:15px; }
+  .row { display:flex; gap:16px; flex-wrap:wrap; } .col { flex:1 1 380px; min-width:300px; }
+  .card { background:var(--panel); border:1px solid var(--line); border-radius:8px;
+          padding:10px 12px; }
+  ul.v { margin:0; padding-left:18px; } .bad { color:var(--bad); } .ok { color:var(--ok); }
+  textarea { width:100%; font-family:ui-monospace,Menlo,monospace; font-size:12.5px; }
+  .actions { display:flex; gap:8px; flex-wrap:wrap; margin-top:8px; align-items:center; }
+  .muted { color:var(--mute); } #empty { margin-top:30vh; text-align:center; color:var(--mute); }
+  #toast { position:fixed; right:16px; bottom:16px; background:var(--text); color:var(--bg);
+           padding:8px 14px; border-radius:8px; opacity:0; transition:opacity .2s; }
+</style>
+</head>
+<body>
+<div class="app">
+  <aside>
+    <div class="bar tabs" id="tabs"></div>
+    <div class="bar">
+      <select id="diff"><option value="">全部難度</option>
+        <option>1</option><option>2</option><option>3</option><option>4</option></select>
+      <a href="/api/export" download="sft.jsonl">匯出已核准 JSONL</a>
+    </div>
+    <div class="bar">
+      <span class="muted">數量</span><input id="gn" type="number" value="10" min="1" max="500" style="width:62px">
+      <span class="muted">seed</span><input id="gs" type="number" value="0" style="width:62px">
+      <select id="gd"><option value="">混合</option><option>1</option><option>2</option>
+        <option>3</option><option>4</option></select>
+      <button id="gen">產生樣本</button>
+    </div>
+    <div id="stats" class="bar muted"></div>
+    <div id="list"></div>
+  </aside>
+  <main id="main"><div id="empty">從左側選一筆樣本開始審核</div></main>
+</div>
+<div id="toast"></div>
+<script>
+const $ = (s) => document.querySelector(s);
+const STATUS = { pending: "待審", approved: "已核准", rejected: "已退回" };
+const TYPE = { clash: "碰撞", wall_penetration: "穿牆", clear_height: "淨高",
+               drain_slope: "坡度" };
+let state = { status: "pending", cur: null };
+
+function el(tag, props = {}, ...kids) {
+  const e = Object.assign(document.createElement(tag), props);
+  kids.flat().forEach((k) => e.append(k));
+  return e;
+}
+function toast(msg) {
+  const t = $("#toast"); t.textContent = msg; t.style.opacity = 1;
+  setTimeout(() => (t.style.opacity = 0), 2600);
+}
+async function api(path, opts) {
+  const r = await fetch(path, opts && { ...opts, headers: { "Content-Type": "application/json" },
+                                        body: JSON.stringify(opts.body) });
+  const data = await r.json().catch(() => ({}));
+  if (!r.ok) throw Object.assign(new Error(JSON.stringify(data.detail ?? data)), { data, status: r.status });
+  return data;
+}
+
+function renderTabs() {
+  const box = $("#tabs"); box.replaceChildren();
+  for (const [k, label] of Object.entries(STATUS)) {
+    box.append(el("button", { textContent: label, className: state.status === k ? "on" : "",
+      onclick: () => { state.status = k; loadList(); renderTabs(); } }));
+  }
+}
+async function loadStats() {
+  const s = await api("/api/stats");
+  const b = s.by_status;
+  $("#stats").textContent = `待審 ${b.pending ?? 0}・核准 ${b.approved ?? 0}・退回 ${b.rejected ?? 0}`;
+}
+async function loadList() {
+  const d = $("#diff").value;
+  const items = await api(`/api/samples?status=${state.status}${d ? "&difficulty=" + d : ""}`);
+  const box = $("#list"); box.replaceChildren();
+  if (!items.length) box.append(el("div", { className: "bar muted", textContent: "沒有樣本" }));
+  for (const s of items) {
+    box.append(el("div", { className: "item" + (state.cur?.id === s.id ? " sel" : ""),
+      onclick: () => { location.hash = s.id; openSample(s.id); } },
+      el("div", { className: "t", textContent: s.id }),
+      el("span", { className: "chip", textContent: "難度 " + s.difficulty }),
+      s.issue_types.length
+        ? s.issue_types.map((t) => el("span", { className: "chip", textContent: TYPE[t] }))
+        : el("span", { className: "chip", textContent: "無違規" })));
+  }
+  loadStats();
+}
+
+function vlist(vs, emptyText) {
+  if (!vs || !vs.length) return el("div", { className: "ok", textContent: emptyText });
+  return el("ul", { className: "v" }, vs.map((v) => el("li", { className: "bad", textContent: v.message })));
+}
+
+async function openSample(id) {
+  const s = await api("/api/samples/" + id);
+  state.cur = s;
+  const cur = s.current;
+  const sc = s.status_check;
+  const pipesBox = el("textarea", { id: "pipes", rows: 8, value: JSON.stringify(cur.fixed_pipes, null, 1) });
+  const textBox = el("textarea", { id: "text", rows: 14, value: cur.assistant_text });
+  const regen = el("input", { type: "checkbox", id: "regen", checked: true });
+  const reason = el("input", { id: "reason", placeholder: "退回 / override 原因", size: 22 });
+  const check = el("div", { className: sc.ok ? "ok" : "bad" },
+    sc.ok ? "✓ 答案通過規則檢查" : "✗ " + sc.problems.join("；"));
+  const verSel = el("select", { onchange: async (e) => draw(await api(`/api/samples/${id}/figure?version=${e.target.value}`)) },
+    s.versions.map((v) => el("option", { value: v.version, selected: v.version === cur.version,
+      textContent: `v${v.version} · ${v.source}` })));
+  $("#main").replaceChildren(
+    el("h2", {}, s.id, " ", el("span", { className: "st-" + s.status, textContent: STATUS[s.status] })),
+    el("div", { className: "muted", textContent:
+      `難度 ${s.difficulty}・題型 ${s.variant}・seed ${s.seed}・目前 v${cur.version}（${cur.source}）` }),
+    el("div", { id: "fig", style: "height:1500px;margin-top:8px" }),
+    el("div", { className: "row" },
+      el("div", { className: "col card" }, el("h3", {}, "原場景的違規"),
+        vlist(s.violations, "無違規（此題答案應為「無需修正」）")),
+      el("div", { className: "col card" }, el("h3", {}, "目前答案套用後的違規"),
+        el("div", { id: "after" }, vlist(s.violations_after, "✓ 已無違規")))),
+    el("h3", {}, "答案檢查"), check,
+    el("h3", {}, "微調修正（有修改的管線完整路徑）"), pipesBox,
+    el("div", { className: "actions" },
+      el("button", { textContent: "驗證並預覽", onclick: preview }),
+      el("button", { className: "primary", textContent: "存成新版本", onclick: saveVersion }),
+      el("label", {}, regen, " 座標有改時重新產生文字"), el("span", { className: "muted" }, "版本："), verSel),
+    el("h3", {}, "Assistant 內容（<think> + 答案）"), textBox,
+    el("h3", {}, "審核"),
+    el("div", { className: "actions" },
+      el("button", { className: "good", textContent: "核准", onclick: () => review("approve") }),
+      el("button", { className: "danger", textContent: "退回", onclick: () => review("reject") }),
+      el("button", { textContent: "重設為待審", onclick: () => review("reset") }), reason),
+    el("h3", {}, "送給模型的題目"),
+    el("pre", { className: "card", style: "white-space:pre-wrap", textContent: s.system + "\n\n" + s.user }));
+  draw(await api(`/api/samples/${id}/figure`));
+  loadList();
+}
+function draw(fig) { Plotly.react("fig", fig.data, fig.layout, { responsive: true }); }
+
+async function preview() {
+  try {
+    const pipes = JSON.parse($("#pipes").value);
+    const r = await api(`/api/samples/${state.cur.id}/preview`, { method: "POST", body: { fixed_pipes: pipes } });
+    draw(r.figure);
+    $("#after").replaceChildren(vlist(r.violations_after, "✓ 已無違規"));
+  } catch (e) { toast("預覽失敗：" + e.message); }
+}
+async function saveVersion() {
+  try {
+    const pipes = JSON.parse($("#pipes").value);
+    const body = { fixed_pipes: pipes, regenerate_text: $("#regen").checked };
+    if ($("#text").value !== state.cur.current.assistant_text) body.assistant_text = $("#text").value;
+    const r = await api(`/api/samples/${state.cur.id}/versions`, { method: "POST", body });
+    toast(`已存成 v${r.version}`); openSample(state.cur.id);
+  } catch (e) { toast("儲存失敗：" + e.message); }
+}
+async function review(decision, override = false) {
+  const reason = $("#reason").value;
+  try {
+    await api(`/api/samples/${state.cur.id}/review`, { method: "POST", body: { decision, reason, override } });
+    toast(STATUS[{ approve: "approved", reject: "rejected", reset: "pending" }[decision]]);
+    openSample(state.cur.id);
+  } catch (e) {
+    if (e.status === 409 && confirm("答案未通過檢查：\n" + e.data.detail.problems.join("\n") +
+        "\n\n要強制核准嗎？（需填寫原因）")) return review(decision, true);
+    toast("失敗：" + e.message);
+  }
+}
+$("#gen").onclick = async () => {
+  $("#gen").disabled = true;
+  try {
+    const r = await api("/api/generate", { method: "POST", body: {
+      n: +$("#gn").value, seed: +$("#gs").value, difficulty: $("#gd").value ? +$("#gd").value : null } });
+    toast(`新增 ${r.added} 筆（重複 ${r.duplicates}）`); loadList();
+  } catch (e) { toast("產生失敗：" + e.message); }
+  $("#gen").disabled = false;
+};
+$("#diff").onchange = loadList;
+renderTabs(); loadList();
+if (location.hash.length > 1) openSample(decodeURIComponent(location.hash.slice(1)));
+</script>
+</body>
+</html>

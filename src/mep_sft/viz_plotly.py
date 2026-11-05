@@ -271,11 +271,11 @@ def _style_section(fig, scene, watch, labels, view, row, col):
         )
 
 
-def render_before_after(
+def build_figure(
     before: Scene, before_violations: list[Violation],
     after: Scene, after_violations: list[Violation],
-    moved: set[str], out_path: str, title: str = "MEP 修正前後",
-) -> None:
+    moved: set[str], title: str = "MEP 修正前後",
+) -> go.Figure:
     s3d = {"type": "scene"}
     xy = {"type": "xy"}
     fig = make_subplots(
@@ -315,4 +315,14 @@ def render_before_after(
             }
         })
     fig.update_layout(title=title, height=1500, margin={"l": 40, "r": 20, "t": 70, "b": 30})
-    fig.write_html(out_path, include_plotlyjs="cdn")
+    return fig
+
+
+def render_before_after(
+    before: Scene, before_violations: list[Violation],
+    after: Scene, after_violations: list[Violation],
+    moved: set[str], out_path: str, title: str = "MEP 修正前後",
+) -> None:
+    build_figure(before, before_violations, after, after_violations, moved, title).write_html(
+        out_path, include_plotlyjs="cdn"
+    )

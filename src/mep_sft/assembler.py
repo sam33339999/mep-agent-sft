@@ -183,8 +183,12 @@ def _think(sample: dict, scene: Scene, fixed: Scene, rng: random.Random, short: 
         lines.append(f"{i}. {TYPE_ZH[v['type']]}：{v['message']}")
     if short:
         return "\n".join(lines)
-    if sample["actions"]:
+    changed = _changed(scene, fixed)
+    if sample["actions"] or changed:
         lines.append("處理方式：")
+    if not sample["actions"]:  # hand-edited answer: no solver trace, describe the result
+        for p in changed:
+            lines.append(f"- 將 {p.id} 改為 {path(p.points)}。")
     for a in sample["actions"]:
         why = _priority_sentence(scene, a)
         gain = a["violations_before"] - a["violations_after"]
@@ -202,6 +206,11 @@ def _changed(scene: Scene, fixed: Scene) -> list:
     return [p for p in fixed.pipes if p.points != old[p.id]]
 
 
+def fixed_pipes_payload(scene: Scene, fixed: Scene) -> list[dict]:
+    """Only the pipes whose path differs, in the answer's json shape."""
+    return [{"id": p.id, "points": [list(q) for q in p.points]} for p in _changed(scene, fixed)]
+
+
 def _violation_list(vs: list[dict]) -> str:
     return "\n".join(f"- {TYPE_ZH[v['type']]}（{'、'.join(v['ids'])}）：{v['message']}" for v in vs)
 
@@ -216,13 +225,14 @@ def _fix_answer(sample: dict, scene: Scene, fixed: Scene, with_reason: bool) -> 
     lines.append(f"- 其餘 {len(scene.pipes) - len(changed)} 條管線維持原位")
     if with_reason:
         seen, reasons = set(), []
-        for a in sample["actions"]:
-            if a["resolved"] not in seen:
-                seen.add(a["resolved"])
-                reasons.append(a["resolved"])
+        for msg in [a["resolved"] for a in sample["actions"]] or [
+            v["message"] for v in sample["violations"]
+        ]:
+            if msg not in seen:
+                seen.add(msg)
+                reasons.append(msg)
         lines.append("理由：" + "；".join(reasons) + "。上述修改後，重新檢查已無任何違規。")
-    payload = {"fixed_pipes": [{"id": p.id, "points": [list(q) for q in p.points]} for p in changed]}
-    return "\n".join(lines) + "\n" + render_block(payload)
+    return "\n".join(lines) + "\n" + render_block({"fixed_pipes": fixed_pipes_payload(scene, fixed)})
 
 
 def _detect_answer(sample: dict) -> str:
@@ -234,6 +244,14 @@ def _detect_answer(sample: dict) -> str:
 
 
 # ------------------------------------------------------------------ public API
+
+def prompt_messages(scene: Scene, variant: str) -> list[dict]:
+    """The system + user turns; they depend only on the scene and the task variant."""
+    return [
+        {"role": "system", "content": SYSTEM_PROMPTS[variant]},
+        {"role": "user", "content": describe_scene(scene) + "\n" + TASKS[variant]},
+    ]
+
 
 def pick_variant(sample: dict) -> str:
     rng = random.Random(f"variant:{sample['id']}")
@@ -250,11 +268,8 @@ def assemble(sample: dict, variant: str | None = None, include_meta: bool = True
     else:
         answer = _fix_answer(sample, scene, fixed, with_reason=variant == "fix_full")
     record = {
-        "messages": [
-            {"role": "system", "content": SYSTEM_PROMPTS[variant]},
-            {"role": "user", "content": describe_scene(scene) + "\n" + TASKS[variant]},
-            {"role": "assistant", "content": f"<think>\n{think}\n</think>\n{answer}"},
-        ]
+        "messages": prompt_messages(scene, variant)
+        + [{"role": "assistant", "content": f"<think>\n{think}\n</think>\n{answer}"}]
     }
     if include_meta:
         record["meta"] = {

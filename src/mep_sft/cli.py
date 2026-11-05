@@ -58,6 +58,15 @@ def cmd_assemble(args) -> int:
     return 0
 
 
+def cmd_serve(args) -> int:
+    import uvicorn
+
+    from .server.app import create_app
+
+    uvicorn.run(create_app(args.db), host=args.host, port=args.port)
+    return 0
+
+
 def main(argv=None) -> int:
     ap = argparse.ArgumentParser(prog="mep_sft")
     sub = ap.add_subparsers(dest="cmd", required=True)
@@ -76,6 +85,11 @@ def main(argv=None) -> int:
     a.add_argument("--out", default="data/train.jsonl")
     a.add_argument("--no-meta", action="store_true", help="輸出只含 messages")
     a.set_defaults(fn=cmd_assemble)
+    sv = sub.add_parser("serve", help="啟動審核網站")
+    sv.add_argument("--db", default="data/review.db")
+    sv.add_argument("--host", default="127.0.0.1")
+    sv.add_argument("--port", type=int, default=8000)
+    sv.set_defaults(fn=cmd_serve)
     args = ap.parse_args(argv)
     return args.fn(args)
 
