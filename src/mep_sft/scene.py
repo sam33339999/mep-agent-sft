@@ -45,6 +45,7 @@ class Pipe:
     points: list[Vec]
     insulation: float = 0.0
     fixed_ends: bool = False  # ends are tied to equipment: may be detoured, never moved rigidly
+    floor: int = 0  # storey index (0-based); clear-height limits are measured from this storey
 
     @property
     def outer_radius(self) -> float:
@@ -58,6 +59,20 @@ class Rules:
     clearance: float = 0.05  # minimum gap between two pipe outer surfaces
     min_drain_slope: float = 0.01  # drainage falls from points[0] to points[-1]
     max_drain_slope: float = 0.10
+    floors: int = 1  # storeys are stacked every `floor_pitch` metres (slab included)
+    floor_pitch: float = 3.2
+
+    def z0(self, floor: int) -> float:
+        return r4(floor * self.floor_pitch)
+
+    def limits(self, floor: int) -> tuple[float, float]:
+        """Absolute (lowest allowed pipe underside, highest allowed pipe top) for a storey."""
+        z0 = self.z0(floor)
+        return r4(z0 + self.min_clear_height), r4(z0 + self.ceiling_height)
+
+    def top(self) -> float:
+        """Absolute ceiling height of the highest storey."""
+        return self.limits(self.floors - 1)[1]
 
 
 @dataclass

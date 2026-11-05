@@ -197,17 +197,18 @@ def _dimension(scene: Scene, v: Violation, view: str) -> tuple[list, tuple[str, 
         text = f"{a.id}-{b.id} 間距 {r4(gap)} m（需 ≥ {rules.clearance}）"
     elif v.type == CLEAR:
         p = scene.pipe(v.ids[0])
-        low = abs(v.threshold - rules.min_clear_height) < 1e-9
+        lo, hi = rules.limits(p.floor)
+        low = abs(v.threshold - lo) < 1e-9
         if low:
             pt = min(p.points, key=lambda q: q[2])
             val = pt[2] - p.outer_radius
-            ok = val >= rules.min_clear_height - 1e-9
-            text = f"{p.id} 管底 {r4(val)} m（需 ≥ {rules.min_clear_height}）"
+            ok = val >= lo - 1e-9
+            text = f"{p.id} 管底 {r4(val)} m（需 ≥ {lo}）"
         else:
             pt = max(p.points, key=lambda q: q[2])
             val = pt[2] + p.outer_radius
-            ok = val <= rules.ceiling_height + 1e-9
-            text = f"{p.id} 管頂 {r4(val)} m（需 ≤ {rules.ceiling_height}）"
+            ok = val <= hi + 1e-9
+            text = f"{p.id} 管頂 {r4(val)} m（需 ≤ {hi}）"
         p1, p2 = (pt[0], pt[1], val), (pt[0], pt[1], v.threshold)
     else:
         return [], None
@@ -250,13 +251,15 @@ HALF_WIDTH = 1.6  # zoom window half-width (m) around the violations
 
 def _window(scene: Scene, watch: list[Violation], view: str):
     """Zoom to the violations; fall back to the whole scene when there are none."""
-    z_hi = scene.rules.ceiling_height + 0.15
+    rules = scene.rules
     if watch:
         hc = sum(_h(v.location, view) for v in watch) / len(watch)
         zc = sum(v.location[2] for v in watch) / len(watch)
+        floor = min(max(int(zc // rules.floor_pitch), 0), rules.floors - 1)
+        z_hi = rules.limits(floor)[1] + 0.15
         return (hc - HALF_WIDTH, hc + HALF_WIDTH), (min(zc - 1.0, z_hi - 1.6), z_hi)
     hs = [_h(pt, view) for p in scene.pipes for pt in p.points]
-    return (min(hs) - 0.8, max(hs) + 0.8), (-0.2, z_hi)
+    return (min(hs) - 0.8, max(hs) + 0.8), (-0.2, rules.top() + 0.15)
 
 
 def _style_section(fig, scene, watch, labels, view, row, col):
@@ -267,11 +270,16 @@ def _style_section(fig, scene, watch, labels, view, row, col):
     fig.update_yaxes(range=[y0, y1], title_text="標高 Z (m)", scaleanchor=xa, scaleratio=1,
                      row=row, col=col)
     r = scene.rules
-    for z, label, color, dash in (
-        (0.0, "樓板 0", "#555", "solid"),
-        (r.min_clear_height, f"淨高線 {r.min_clear_height}", "#e07b00", "dash"),
-        (r.ceiling_height, f"天花板 {r.ceiling_height}", "#555", "solid"),
-    ):
+    lines = []
+    for k in range(r.floors):
+        lo, hi = r.limits(k)
+        tag = f"{k + 1}F " if r.floors > 1 else ""
+        lines += [
+            (r.z0(k), f"{tag}樓板 {r.z0(k)}", "#555", "solid"),
+            (lo, f"{tag}淨高線 {lo}", "#e07b00", "dash"),
+            (hi, f"{tag}天花板 {hi}", "#555", "solid"),
+        ]
+    for z, label, color, dash in lines:
         fig.add_shape(type="line", x0=x0, x1=x1, y0=z, y1=z, xref=xa, yref=ya,
                       line={"color": color, "dash": dash, "width": 1.5})
         fig.add_annotation(x=x1, y=z, xref=xa, yref=ya, text=label, showarrow=False,
@@ -374,7 +382,7 @@ def build_figure(
         fig.update_layout(**{
             name: {
                 "aspectmode": "data",
-                "zaxis": {"range": [0, before.rules.ceiling_height + 0.2]},
+                "zaxis": {"range": [0, before.rules.top() + 0.2]},
                 "camera": {"eye": {"x": 1.4, "y": -1.6, "z": 0.7}},
             }
         })

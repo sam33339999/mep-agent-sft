@@ -138,7 +138,7 @@ function buildWalls(scene) {
 function bounds(scene) {
   const b = new THREE.Box3();
   scene.walls.forEach((w) => { b.expandByPoint(new THREE.Vector3(w.p0[0], w.p0[1], 0));
-    b.expandByPoint(new THREE.Vector3(w.p1[0], w.p1[1], w.height)); });
+    b.expandByPoint(new THREE.Vector3(w.p1[0], w.p1[1], (w.z0 || 0) + w.height)); });
   scene.pipes.forEach((p) => p.points.forEach((q) => b.expandByPoint(new THREE.Vector3(...q))));
   return b;
 }
@@ -153,8 +153,11 @@ function buildPlanes(scene) {
   };
   const floor = new THREE.GridHelper(Math.max(sz.x, sz.y) + 2, Math.round(Math.max(sz.x, sz.y) + 2), 0x888888, 0xbbbbbb);
   floor.rotation.x = Math.PI / 2; floor.position.set(c.x, c.y, 0); grpPlanes.add(floor);
-  plane(scene.rules.min_clear_height, 0xff8c00, 0.16);
-  plane(scene.rules.ceiling_height, 0x58a6ff, 0.10);
+  for (let k = 0; k < (scene.rules.floors || 1); k++) { // every storey has its own limits
+    const z0 = k * (scene.rules.floor_pitch || 3.2);
+    plane(z0 + scene.rules.min_clear_height, 0xff8c00, 0.16);
+    plane(z0 + scene.rules.ceiling_height, 0x58a6ff, 0.10);
+  }
 }
 
 // ---------------------------------------------------------------- pipes

@@ -100,8 +100,8 @@ def check_walls(scene: Scene) -> list[Violation]:
 
 def check_clear_height(scene: Scene) -> list[Violation]:
     out = []
-    lo, hi = scene.rules.min_clear_height, scene.rules.ceiling_height
     for p in scene.pipes:
+        lo, hi = scene.rules.limits(p.floor)
         r = p.outer_radius
         low = min(pt[2] for pt in p.points)
         high = max(pt[2] for pt in p.points)

@@ -54,18 +54,29 @@ def describe_scene(scene: Scene) -> str:
                 f"沿牆 {n(o.u0)}~{n(o.u1)} m、標高 {n(o.z0)}~{n(o.z1)} m" for o in w.openings
             )
             extra = f"，開口：{ops}"
+        base = f"，底部標高 {n(w.z0)} m" if w.z0 else ""
         lines.append(
             f"- 牆 {w.id}：從 ({n(w.p0[0])},{n(w.p0[1])}) 到 ({n(w.p1[0])},{n(w.p1[1])})，"
-            f"厚 {n(w.thickness)} m，高 {n(w.height)} m{extra}"
+            f"厚 {n(w.thickness)} m，高 {n(w.height)} m{base}{extra}"
         )
     for p in scene.pipes:
         flags = f"，保溫厚 {n(p.insulation)} m" if p.insulation else ""
         flags += "，兩端固定（接設備，不可整條平移）" if p.fixed_ends else ""
+        where = f"，第 {p.floor + 1} 層" if r.floors > 1 else ""
         lines.append(
-            f"- 管線 {p.id}（{SYSTEM_ZH[p.system]}）：{path(p.points)}，直徑 {n(p.diameter)} m{flags}"
+            f"- 管線 {p.id}（{SYSTEM_ZH[p.system]}{where}）：{path(p.points)}，"
+            f"直徑 {n(p.diameter)} m{flags}"
         )
+    if r.floors > 1:
+        per_floor = "；".join(
+            f"第 {k + 1} 層管底 ≥ {n(r.limits(k)[0])} m 且管頂 ≤ {n(r.limits(k)[1])} m"
+            for k in range(r.floors)
+        )
+        clear_rule = f"各層標高限制（絕對標高）：{per_floor}"
+    else:
+        clear_rule = f"管底標高 ≥ {n(r.min_clear_height)} m 且管頂 ≤ 天花板 {n(r.ceiling_height)} m"
     lines.append(
-        f"規則：管底標高 ≥ {n(r.min_clear_height)} m 且管頂 ≤ 天花板 {n(r.ceiling_height)} m；"
+        f"規則：{clear_rule}；"
         f"管線外緣間距 ≥ {n(r.clearance)} m；不可穿牆（開口除外）；"
         f"排水管由第一點往最後一點下降，坡度 {n(r.min_drain_slope * 100)}%~"
         f"{n(r.max_drain_slope * 100)}%。座標單位為公尺，Z 向上。"

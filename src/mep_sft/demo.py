@@ -52,7 +52,23 @@ def slope() -> Scene:
     )
 
 
-CASES = {"two-pipes": two_pipes, "jog": jog, "opening": opening, "slope": slope}
+def two_floors() -> Scene:
+    """Storey 2 sits 3.2 m up. Its pipe C is 0.15 m too low *for that storey* (bottom 5.45 < 5.6),
+    while the same height would be a ceiling violation on storey 1."""
+    return Scene(
+        walls=[Wall("W1", (0.0, 0.0), (8.0, 0.0)), Wall("F2-W1", (0.0, 0.0), (8.0, 0.0), z0=3.2)],
+        pipes=[
+            Pipe("A", "water", 0.1, [(1.0, 1.0, 2.6), (6.0, 1.0, 2.6)]),
+            Pipe("C", "water", 0.1, [(1.0, 1.0, 5.5), (6.0, 1.0, 5.5)], floor=1),
+        ],
+        rules=Rules(floors=2),
+        injected=["clear_height"],
+        meta={"name": "two-floors"},
+    )
+
+
+CASES = {"two-pipes": two_pipes, "jog": jog, "opening": opening, "slope": slope,
+         "two-floors": two_floors}
 
 
 def demo_scene(case: str = "two-pipes") -> Scene:

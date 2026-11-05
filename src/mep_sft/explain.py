@@ -66,16 +66,18 @@ def _wall(scene: Scene, v: dict, n: str) -> dict:
 def _clear(scene: Scene, v: dict, n: str) -> dict:
     p = scene.pipe(v["ids"][0])
     r, rules = p.outer_radius, scene.rules
-    low = abs(v["threshold"] - rules.min_clear_height) < 1e-9
+    floor_note = f"，第 {p.floor + 1} 層" if rules.floors > 1 else ""
+    lo, hi = rules.limits(p.floor)
+    low = abs(v["threshold"] - lo) < 1e-9
     if low:
         centre = r4(v["value"] + r)
         calc = (f"管底標高 = 管中心標高 − 外半徑 = {centre} − {r4(r)} = {v['value']} m；"
-                f"規則要求 ≥ {rules.min_clear_height} m（淨高線）。")
+                f"規則要求 ≥ {lo} m（淨高線{floor_note}）。")
         meaning = "淨高是人走過去頭上要留的空間。管底太低會擋住通道、撞到頭，也會讓後續設備進不來。"
     else:
         centre = r4(v["value"] - r)
         calc = (f"管頂標高 = 管中心標高 + 外半徑 = {centre} + {r4(r)} = {v['value']} m；"
-                f"天花板在 {rules.ceiling_height} m，超出 {r4(v['value'] - rules.ceiling_height)} m。")
+                f"天花板在 {hi} m，超出 {r4(v['value'] - hi)} m。")
         meaning = "管頂超過天花板，表示這條管會穿出天花板，吊頂內放不下。"
     return {
         "title": f"{n} {TYPE_ZH[CLEAR]}：{p.id}",

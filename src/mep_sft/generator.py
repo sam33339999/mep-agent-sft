@@ -42,6 +42,7 @@ class Level:
     fixed_prob: float
     ceilings: tuple[float, ...]
     clearances: tuple[float, ...]
+    floors: int = 1
 
 
 LEVELS = {
@@ -50,7 +51,7 @@ LEVELS = {
     3: Level((5, 8), (2, 3), ("water", "electrical", "drainage", "duct"), True, 0.25, (3.0, 2.9),
              (0.05, 0.1)),
     4: Level((8, 12), (3, 4), ("water", "electrical", "drainage", "duct"), True, 0.35,
-             (2.9, 2.8), (0.05, 0.1)),
+             (2.9, 2.8), (0.05, 0.1), floors=2),
 }
 
 
@@ -67,10 +68,9 @@ def _floor_g(x: float) -> float:
     return r4(math.floor(x / GRID + 1e-9) * GRID)
 
 
-def _band(scene: Scene, radius: float) -> tuple[float, float]:
-    return _ceil_g(scene.rules.min_clear_height + radius), _floor_g(
-        scene.rules.ceiling_height - radius
-    )
+def _band(scene: Scene, radius: float, floor: int = 0) -> tuple[float, float]:
+    lo, hi = scene.rules.limits(floor)
+    return _ceil_g(lo + radius), _floor_g(hi - radius)
 
 
 def _next_id(scene: Scene) -> str:
@@ -82,30 +82,34 @@ def _next_id(scene: Scene) -> str:
 def _room(rng: random.Random, lv: Level) -> Scene:
     w, d = rng.randint(6, 12), rng.randint(4, 8)
     ceiling = rng.choice(lv.ceilings)
-    rules = Rules(ceiling_height=ceiling, min_clear_height=2.4, clearance=rng.choice(lv.clearances))
-    walls = [
-        Wall("W1", (0.0, 0.0), (float(w), 0.0), WALL_T, ceiling),
-        Wall("W2", (float(w), 0.0), (float(w), float(d)), WALL_T, ceiling),
-        Wall("W3", (float(w), float(d)), (0.0, float(d)), WALL_T, ceiling),
-        Wall("W4", (0.0, float(d)), (0.0, 0.0), WALL_T, ceiling),
-    ]
-    scene = Scene(walls=walls, pipes=[], rules=rules, meta={"room": [w, d]})
-    if lv.interior_wall:
-        xw = float(w // 2)
-        u0 = g(rng.uniform(1.0, d - 2.5))
-        walls.append(
-            Wall("W5", (xw, 0.0), (xw, float(d)), WALL_T, ceiling,
-                 openings=[Opening(u0, r4(u0 + 1.2), 2.3, ceiling)])
-        )
+    rules = Rules(ceiling_height=ceiling, min_clear_height=2.4, clearance=rng.choice(lv.clearances),
+                  floors=lv.floors)
+    scene = Scene(walls=[], pipes=[], rules=rules, meta={"room": [w, d], "interior": {}})
+    xw = float(w // 2)
+    u0 = g(rng.uniform(1.0, d - 2.5))  # same opening position on every storey
+    for k in range(lv.floors):
+        z0 = rules.z0(k)
+        tag = "" if k == 0 else f"F{k + 1}-"
+        corners = [((0.0, 0.0), (float(w), 0.0)), ((float(w), 0.0), (float(w), float(d))),
+                   ((float(w), float(d)), (0.0, float(d))), ((0.0, float(d)), (0.0, 0.0))]
+        for i, (p0, p1) in enumerate(corners, 1):
+            scene.walls.append(Wall(f"{tag}W{i}", p0, p1, WALL_T, ceiling, z0))
+        if lv.interior_wall:
+            wid = f"{tag}W5"
+            scene.walls.append(
+                Wall(wid, (xw, 0.0), (xw, float(d)), WALL_T, ceiling, z0,
+                     openings=[Opening(u0, r4(u0 + 1.2), r4(z0 + 2.3), r4(z0 + ceiling))])
+            )
+            scene.meta["interior"][str(k)] = wid
     return scene
 
 
-def _try_pipe(rng: random.Random, scene: Scene, system: str) -> Pipe | None:
+def _try_pipe(rng: random.Random, scene: Scene, system: str, floor: int = 0) -> Pipe | None:
     w, d = scene.meta["room"]
     diam = rng.choice(DIAMETERS[system])
     ins = rng.choice(INSULATION[system])
     radius = diam / 2 + ins
-    zlo, zhi = _band(scene, radius)
+    zlo, zhi = _band(scene, radius, floor)
     if zlo > zhi:
         return None
     ax = rng.choice((0, 1))  # run direction: 0 = along x, 1 = along y
@@ -128,23 +132,25 @@ def _try_pipe(rng: random.Random, scene: Scene, system: str) -> Pipe | None:
     def pt(along, z):
         return (along, lateral, z) if ax == 0 else (lateral, along, z)
 
-    return Pipe(_next_id(scene), system, diam, [pt(a, za), pt(b, zb)], ins)
+    return Pipe(_next_id(scene), system, diam, [pt(a, za), pt(b, zb)], ins, floor=floor)
 
 
-def _through_opening_pipe(rng: random.Random, scene: Scene) -> Pipe | None:
-    """A pipe that legitimately passes through the interior wall's opening."""
+def _through_opening_pipe(rng: random.Random, scene: Scene, floor: int) -> Pipe | None:
+    """A pipe that legitimately passes through this storey's interior-wall opening."""
     w, _ = scene.meta["room"]
-    wall = scene.walls[-1]
+    wid = scene.meta["interior"][str(floor)]
+    wall = next(x for x in scene.walls if x.id == wid)
     op = wall.openings[0]
     system = rng.choice(("water", "electrical"))
     diam = rng.choice(DIAMETERS[system])
-    zlo, zhi = _band(scene, diam / 2)
+    zlo, zhi = _band(scene, diam / 2, floor)
     if zlo > zhi:
         return None
     y = g((op.u0 + op.u1) / 2)
     z = g(rng.uniform(zlo, zhi))
     z = min(max(z, r4(op.z0 + diam / 2)), r4(op.z1 - diam / 2))
-    return Pipe(_next_id(scene), system, diam, [(MARGIN, y, z), (float(w) - MARGIN, y, z)])
+    return Pipe(_next_id(scene), system, diam, [(MARGIN, y, z), (float(w) - MARGIN, y, z)],
+                floor=floor)
 
 
 def build_clean(rng: random.Random, difficulty: int) -> Scene:
@@ -152,13 +158,14 @@ def build_clean(rng: random.Random, difficulty: int) -> Scene:
     scene = _room(rng, lv)
     target = rng.randint(*lv.pipes)
     if lv.interior_wall:
-        p = _through_opening_pipe(rng, scene)
-        if p:
-            scene.pipes.append(p)
+        for k in range(lv.floors):
+            p = _through_opening_pipe(rng, scene, k)
+            if p:
+                scene.pipes.append(p)
     for _ in range(target * 12):
         if len(scene.pipes) >= target:
             break
-        p = _try_pipe(rng, scene, rng.choice(lv.systems))
+        p = _try_pipe(rng, scene, rng.choice(lv.systems), rng.randrange(lv.floors))
         if p is None:
             continue
         scene.pipes.append(p)
@@ -184,14 +191,14 @@ def _horizontal(p: Pipe) -> int | None:
 
 
 def _cross_pipe(scene: Scene, ax: int, along: float, lateral: float, z: float, reach: tuple,
-                system: str, diam: float, ins: float) -> Pipe:
+                system: str, diam: float, ins: float, floor: int = 0) -> Pipe:
     """Pipe running perpendicular to `ax`, crossing the line at `along`."""
     lo, hi = lateral - reach[0], lateral + reach[1]
 
     def pt(v):
         return (along, v, z) if ax == 0 else (v, along, z)
 
-    return Pipe(_next_id(scene), system, diam, [pt(r4(lo)), pt(r4(hi))], ins)
+    return Pipe(_next_id(scene), system, diam, [pt(r4(lo)), pt(r4(hi))], ins, floor=floor)
 
 
 def mut_clash(rng: random.Random, scene: Scene, lv: Level) -> bool:
@@ -212,7 +219,7 @@ def mut_clash(rng: random.Random, scene: Scene, lv: Level) -> bool:
         diam = rng.choice(DIAMETERS[system])
         ins = rng.choice(INSULATION[system])
         radius = diam / 2 + ins
-        zlo, zhi = _band(scene, radius)
+        zlo, zhi = _band(scene, radius, p.floor)
         if zlo > zhi:
             continue
         room_lat = (d, w)[ax]  # room extent along the crossing pipe's own axis
@@ -224,7 +231,7 @@ def mut_clash(rng: random.Random, scene: Scene, lv: Level) -> bool:
         dzs = [k * GRID for k in range(-8, 9) if abs(k * GRID) < limit]
         z = g(zp + rng.choice(dzs))
         z = min(max(z, zlo), zhi)
-        q = _cross_pipe(scene, ax, along, lateral, z, (r_lo, r_hi), system, diam, ins)
+        q = _cross_pipe(scene, ax, along, lateral, z, (r_lo, r_hi), system, diam, ins, p.floor)
         scene.pipes.append(q)
         if any(v.type == CLASH and q.id in v.ids for v in check_all(scene)):
             return True
@@ -248,14 +255,15 @@ def mut_wall(rng: random.Random, scene: Scene, lv: Level) -> bool:
         system = rng.choice(lv.systems)
         diam = rng.choice(DIAMETERS[system])
         ins = rng.choice(INSULATION[system])
-        zlo, zhi = _band(scene, diam / 2 + ins)
+        floor = round(wall.z0 / scene.rules.floor_pitch)
+        zlo, zhi = _band(scene, diam / 2 + ins, floor)
         if zlo > zhi:
             continue
         z = g(rng.uniform(zlo, zhi))
         wall_at = wall.p0[ax]
         reach = (g(rng.uniform(0.6, 1.2)), g(rng.uniform(0.6, 1.2)))
         # the new pipe runs along `ax`, crossing the wall at coordinate wall_at on that axis
-        q = _cross_pipe(scene, 1 - ax, u, wall_at, z, reach, system, diam, ins)
+        q = _cross_pipe(scene, 1 - ax, u, wall_at, z, reach, system, diam, ins, floor)
         scene.pipes.append(q)
         if any(v.type == WALL and q.id in v.ids for v in check_all(scene)):
             return True
@@ -268,12 +276,13 @@ def mut_clear(rng: random.Random, scene: Scene, lv: Level) -> bool:
     rng.shuffle(cands)
     for p in cands:
         r = p.outer_radius
+        lo, hi = scene.rules.limits(p.floor)
         if rng.random() < 0.7:  # underside too low
             bottom = min(z for _, _, z in p.points) - r
-            dz = g(2.4 - rng.randint(1, 4) * GRID - bottom)
+            dz = g(lo - rng.randint(1, 4) * GRID - bottom)
         else:  # top above the ceiling
             top = max(z for _, _, z in p.points) + r
-            dz = g(scene.rules.ceiling_height + rng.randint(1, 3) * GRID - top)
+            dz = g(hi + rng.randint(1, 3) * GRID - top)
         if dz == 0:
             continue
         old = p.points
