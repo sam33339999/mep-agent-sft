@@ -8,10 +8,13 @@ from __future__ import annotations
 
 import itertools
 import json
+import math
 import random
+from dataclasses import replace
 from pathlib import Path
 
-from .answer import new_openings_payload, render_block
+from .answer import apply_fix, new_openings_payload, render_block
+from .rules import _wall_local, clash_measure
 from .scene import SYSTEM_PRIORITY, Scene
 
 SYSTEM_ZH = {"drainage": "排水", "duct": "風管", "water": "給水", "electrical": "電氣"}
@@ -194,6 +197,79 @@ def _action_text(scene: Scene, fixed: Scene, a: dict) -> str:
     raise ValueError(k)
 
 
+def _step(cur: Scene, a: dict) -> Scene:
+    """The scene after one solver action (so every step is explained from its real before/after)."""
+    pts = [tuple(q) for q in a["points"]]
+    nxt = replace(cur, pipes=[replace(p, points=pts) if p.id == a["pipe_id"] else p
+                              for p in cur.pipes])
+    if a["kind"] == "add_opening":
+        d = a["detail"]
+        nxt = apply_fix(nxt, [], [{"wall": d["wall"], **{k: d[k] for k in ("u0", "u1", "z0", "z1")}}])
+    return nxt
+
+
+def _first_bad_slope(p, rules):
+    for i, (a, b) in enumerate(itertools.pairwise(p.points)):
+        run = math.hypot(b[0] - a[0], b[1] - a[1])
+        if run < 1e-6:
+            continue
+        slope = (a[2] - b[2]) / run
+        if slope < rules.min_drain_slope - 1e-9 or slope > rules.max_drain_slope + 1e-9:
+            return i, run, a[2] - b[2], slope
+    return None
+
+
+def _calc(cur: Scene, nxt: Scene, a: dict) -> str:
+    """The arithmetic behind one step, with the numbers measured on the scene before and after."""
+    k, pid, vt, r = a["kind"], a["pipe_id"], a["vtype"], cur.rules
+    p0, p1 = cur.pipe(pid), nxt.pipe(pid)
+    if vt == "clash" and k in ("shift_z", "shift_xy", "jog_z", "jog_xy"):
+        x, y = a["ids"][0], a["ids"][1]
+        g0 = clash_measure(cur.pipe(x), cur.pipe(y))[0]
+        g1 = clash_measure(nxt.pipe(x), nxt.pipe(y))[0]
+        return (f"計算：{x}-{y} 外緣間距 {n(g0)} m，需 ≥ {n(r.clearance)} m（還差 "
+                f"{n(r.clearance - g0)} m）；移動後外緣間距 {n(g1)} m。")
+    if vt == "clear_height" and k in ("shift_z", "jog_z"):
+        lo, hi = r.limits(p0.floor)
+        R = p0.outer_radius
+        z_lo0, z_hi0 = min(q[2] for q in p0.points), max(q[2] for q in p0.points)
+        z_lo1, z_hi1 = min(q[2] for q in p1.points), max(q[2] for q in p1.points)
+        if "管底" in a["resolved"]:
+            return (f"計算：管底 = 最低中心標高 {n(z_lo0)} − 外半徑 {n(R)} = {n(z_lo0 - R)} m，"
+                    f"需 ≥ {n(lo)} m，至少上移 {n(lo - (z_lo0 - R))} m；移動後管底 "
+                    f"{n(z_lo1 - R)} m。")
+        return (f"計算：管頂 = 最高中心標高 {n(z_hi0)} + 外半徑 {n(R)} = {n(z_hi0 + R)} m，"
+                f"需 ≤ {n(hi)} m，至少下移 {n(z_hi0 + R - hi)} m；移動後管頂 {n(z_hi1 + R)} m。")
+    if vt == "drain_slope" and k == "reslope":
+        bad = _first_bad_slope(p0, r)
+        if bad:
+            i, run, drop0, s0 = bad
+            a1, b1 = p1.points[i], p1.points[i + 1]
+            drop1 = a1[2] - b1[2]
+            return (f"計算：水平距離 {n(run)} m、高差 {n(drop0)} m，坡度 = {n(drop0)} ÷ {n(run)} = "
+                    f"{n(round(s0 * 100, 2))}%（需 {n(r.min_drain_slope * 100)}%~"
+                    f"{n(r.max_drain_slope * 100)}%）；目標 2%，下降量 {n(run)} × 0.02 向上取 0.05 m "
+                    f"格線 = {n(drop1)} m，新坡度 {n(round(drop1 / run * 100, 2))}%。")
+    if vt == "wall_penetration" and len(a["ids"]) > 1:
+        wall = next(w for w in cur.walls if w.id == a["ids"][1])
+        R = p0.outer_radius
+        if k == "trim":
+            raw = wall.thickness / 2 + R + 0.05
+            cut = math.ceil(raw / 0.05 - 1e-9) * 0.05
+            return (f"計算：牆 {wall.id} 半厚 {n(wall.thickness / 2)} + 管外半徑 {n(R)} + 間隙 0.05 = "
+                    f"{n(raw)} m，向上取 0.05 m 格線 = {n(cut)} m；新端點離牆中心面 {n(cut)} m。")
+        if k == "slide_wall":
+            u0, u1 = _wall_local(wall, p0.points[0])[0], _wall_local(wall, p1.points[0])[0]
+            ops = "；".join(f"沿牆 {n(o.u0)}~{n(o.u1)} m" for o in wall.openings)
+            return (f"計算：牆 {wall.id} 的開口為 {ops}；管的沿牆位置要落在開口內縮外半徑 {n(R)} m 的"
+                    f"範圍，管的沿牆位置由 {n(u0)} m 移到 {n(u1)} m。")
+        if k == "add_opening":
+            d = a["detail"]
+            return (f"計算：開口 = 管外緣（外半徑 {n(R)} m）再各多留 0.1 m，外側取 0.05 m 格線："
+                    f"沿牆 {n(d['u0'])}~{n(d['u1'])} m、標高 {n(d['z0'])}~{n(d['z1'])} m。")
+    return ""
+
+
 def _think(sample: dict, scene: Scene, fixed: Scene, rng: random.Random, short: bool) -> str:
     vs = sample["violations"]
     lines = []
@@ -220,14 +296,20 @@ def _think(sample: dict, scene: Scene, fixed: Scene, rng: random.Random, short: 
             lines.append(f"- 將 {p.id} 改為 {path(p.points)}。")
         for o in opened:
             lines.append(f"- 在牆 {o['wall']} 新增開口（沿牆 {n(o['u0'])}~{n(o['u1'])} m）。")
+    cur = scene
     for a in sample["actions"]:
-        why = _priority_sentence(scene, a)
+        nxt = _step(cur, a)
+        why = _priority_sentence(cur, a)
         gain = a["violations_before"] - a["violations_after"]
         extra = (
             f"，一次消除 {gain} 項違規" if gain > 1
             else "，這項違規解除了，但會牽動另一項，下一步處理" if gain == 0 else ""
         )
-        lines.append(f"- {why + '：' if why else ''}{_action_text(scene, fixed, a)}{extra}。")
+        lines.append(f"- {why + '：' if why else ''}{_action_text(cur, nxt, a)}{extra}。")
+        calc = _calc(cur, nxt, a)
+        if calc:
+            lines.append("  " + calc)
+        cur = nxt
     lines.append(
         rng.choice(("重新檢查修正後的場景：", "套用後再驗證一次："))
         + f"違規由 {len(vs)} 項降為 0。"

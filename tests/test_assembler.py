@@ -1,5 +1,7 @@
 import json
 
+import pytest
+
 from mep_sft.answer import apply_fix, extract_json
 from mep_sft.assembler import VARIANTS, assemble, assemble_file, describe_scene
 from mep_sft.generator import generate_dataset
@@ -146,3 +148,58 @@ def test_apply_fix_rejects_openings_in_structural_walls_and_nonsense():
     for bad in ({**ok, "wall": "NOPE"}, {**ok, "u0": 2.0, "u1": 1.0}, {**ok, "u1": 99.0},
                 {**ok, "z1": 9.0}, {"wall": "W1"}):
         assert apply_fix(sc, [], [bad]) is None
+
+
+def test_stepwise_replay_ends_exactly_at_the_stored_solution():
+    """The reasoning explains each step from its own before/after state, so replaying every action
+    must land on the stored fixed scene (paths and wall openings)."""
+    from mep_sft.assembler import _step
+
+    checked = 0
+    for s in SAMPLES:
+        cur = Scene.from_dict(s["scene"])
+        for a in s["actions"]:
+            cur = _step(cur, a)
+        fixed = Scene.from_dict(s["fixed"])
+        assert [p.points for p in cur.pipes] == [p.points for p in fixed.pipes], s["id"]
+        assert [w.openings for w in cur.walls] == [w.openings for w in fixed.walls], s["id"]
+        checked += bool(s["actions"])
+    assert checked > 20
+
+
+def test_every_action_gets_its_arithmetic():
+    """fix_full shows the calculation behind each step; the numbers are measured, not templated."""
+    from mep_sft.assembler import _calc, _step
+
+    need = {"clash": ("shift_z", "shift_xy", "jog_z", "jog_xy"), "clear_height": ("shift_z", "jog_z"),
+            "drain_slope": ("reslope",), "wall_penetration": ("trim", "slide_wall", "add_opening")}
+    seen = set()
+    for s in SAMPLES:
+        cur = Scene.from_dict(s["scene"])
+        for a in s["actions"]:
+            nxt = _step(cur, a)
+            if a["kind"] in need.get(a["vtype"], ()):
+                calc = _calc(cur, nxt, a)
+                assert calc.startswith("計算："), (s["id"], a["vtype"], a["kind"])
+                seen.add((a["vtype"], a["kind"]))
+            cur = nxt
+    assert {v for v, _ in seen} == set(need)  # every violation type was exercised
+
+
+def test_calc_numbers_match_the_scene():
+    from mep_sft.assembler import _calc, n
+    from mep_sft.demo import two_pipes
+    from mep_sft.rules import clash_measure
+    from mep_sft.solver import solve as solve_scene
+
+    sc = two_pipes()
+    res = solve_scene(sc)
+    a = res.actions[0]
+    d = {"kind": a.kind, "pipe_id": a.pipe_id, "vtype": a.vtype, "ids": a.ids, "detail": a.detail,
+         "resolved": a.resolved, "points": a.points}
+    text = _calc(sc, res.fixed, d)
+    before = clash_measure(sc.pipe("A"), sc.pipe("B"))[0]
+    after = clash_measure(res.fixed.pipe("A"), res.fixed.pipe("B"))[0]
+    assert before == pytest.approx(-0.075) and after == pytest.approx(0.075)
+    assert f"外緣間距 {n(before)} m" in text and f"移動後外緣間距 {n(after)} m" in text
+    assert "-0.075" in text and "0.075 m。" in text and "還差 0.125 m" in text
