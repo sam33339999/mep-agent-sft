@@ -385,7 +385,7 @@ def generate_sample(seed: int, difficulty: int, stats: Stats | None = None,
             "actions": [
                 {"kind": a.kind, "pipe_id": a.pipe_id, "detail": a.detail,
                  "resolved": a.resolved, "vtype": a.vtype, "ids": a.ids, "skipped": a.skipped,
-                 "violations_before": a.violations_before,
+                 "points": a.points, "violations_before": a.violations_before,
                  "violations_after": a.violations_after}
                 for a in res.actions
             ],

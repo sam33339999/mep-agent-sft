@@ -4,9 +4,10 @@ from __future__ import annotations
 
 import json
 import math
+from dataclasses import replace
 
 from ..answer import apply_fix, extract_json
-from ..assembler import assemble
+from ..assembler import action_text, assemble, priority_sentence
 from ..rules import check_all
 from ..scene import Scene
 from ..viz_plotly import build_figure
@@ -58,15 +59,45 @@ def answer_status(sample: dict, version: dict) -> dict:
     return {"ok": not problems, "problems": problems, "stale": stale}
 
 
-def figure_json(sample: dict, fixed_pipes: list[dict]) -> tuple[dict, list[dict]]:
+def figure_json(sample: dict, fixed_pipes: list[dict], highlight: list[str] | None = None,
+                blind: bool = False) -> tuple[dict, list[dict]]:
     scene = Scene.from_dict(sample["scene"])
+    if blind:  # quiz: the bare scene, no markers, counts or dimensions
+        fig = build_figure(scene, [], scene, [], set(), title=sample["id"], blind=True)
+        return json.loads(fig.to_json()), []
     fixed = apply_fix(scene, fixed_pipes)
     if fixed is None:
         raise ValueError("fixed_pipes 格式錯誤或含不存在的管線")
     before, after = check_all(scene), check_all(fixed)
-    moved = {p["id"] for p in fixed_pipes}
+    moved = set(highlight) if highlight is not None else {p["id"] for p in fixed_pipes}
     fig = build_figure(scene, before, fixed, after, moved, title=sample["id"])
     return json.loads(fig.to_json()), [v.to_dict() for v in after]
+
+
+def replay_steps(sample: dict) -> list[dict]:
+    """The solver's actions as cumulative states, for the step-by-step tour."""
+    scene = Scene.from_dict(sample["scene"])
+    steps = [{
+        "step": 0, "text": f"原始場景：共 {len(sample['violations'])} 項違規。",
+        "fixed_pipes": [], "violations": len(sample["violations"]), "highlight": [],
+    }]
+    cur, cum = scene, {}
+    for i, a in enumerate(sample.get("actions", []), 1):
+        if not a.get("points"):
+            return steps[:1]  # sample predates trace points: nothing to replay
+        pts = [tuple(q) for q in a["points"]]
+        nxt = replace(cur, pipes=[replace(p, points=pts) if p.id == a["pipe_id"] else p
+                                  for p in cur.pipes])
+        why = priority_sentence(cur, a)
+        cum[a["pipe_id"]] = pts
+        steps.append({
+            "step": i, "text": (why + "：" if why else "") + action_text(cur, nxt, a) + "。",
+            "fixed_pipes": [{"id": k, "points": [list(q) for q in v]} for k, v in cum.items()],
+            "violations": a["violations_after"], "highlight": [a["pipe_id"]],
+            "resolved": a["resolved"],
+        })
+        cur = nxt
+    return steps
 
 
 def regenerate_text(sample: dict, fixed_pipes: list[dict]) -> str:

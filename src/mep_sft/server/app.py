@@ -13,16 +13,27 @@ from pydantic import BaseModel, Field
 from ..answer import apply_fix
 from ..assembler import assemble as assemble_sample
 from ..assembler import fixed_pipes_payload, pick_variant, prompt_messages
+from ..explain import explain
 from ..generator import generate_dataset
+from ..rules import check_all
 from ..scene import Scene
+from ..viz_plotly import num
 from .db import Store
-from .logic import answer_status, canonical, figure_json, regenerate_text, valid_payload
+from .logic import (
+    answer_status,
+    canonical,
+    figure_json,
+    regenerate_text,
+    replay_steps,
+    valid_payload,
+)
 
 WEB = Path(__file__).resolve().parents[3] / "web"
 
 
 class Preview(BaseModel):
     fixed_pipes: list[dict]
+    highlight: list[str] | None = None
 
 
 class NewVersion(BaseModel):
@@ -79,14 +90,16 @@ def create_app(db_path: str = "data/review.db") -> FastAPI:
         cur = versions[-1]
         scene = Scene.from_dict(s["scene"])
         fixed = apply_fix(scene, cur["fixed_pipes"])
-        from ..rules import check_all
         msgs = prompt_messages(scene, s["variant"])
+        after = [v.to_dict() for v in check_all(fixed)] if fixed else None
         return {
             **s,
             "versions": [{k: v for k, v in x.items() if k != "assistant_text"} for x in versions],
             "current": cur,
             "status_check": answer_status(s, cur),
-            "violations_after": [v.to_dict() for v in check_all(fixed)] if fixed else None,
+            "violations_after": after,
+            "explain_before": [explain(scene, v, num(i)) for i, v in enumerate(s["violations"])],
+            "explain_after": [explain(fixed, v, "") for v in after] if fixed else [],
             "system": msgs[0]["content"],
             "user": msgs[1]["content"],
             "reviews": store.reviews(sample_id),
@@ -94,14 +107,18 @@ def create_app(db_path: str = "data/review.db") -> FastAPI:
         }
 
     @app.get("/api/samples/{sample_id}/figure")
-    def figure(sample_id: str, version: int | None = None):
+    def figure(sample_id: str, version: int | None = None, blind: bool = False):
         s = load(sample_id)
         vs = store.versions(sample_id)
         v = vs[-1] if version is None else next((x for x in vs if x["version"] == version), None)
         if v is None:
             raise HTTPException(404, "version not found")
-        fig, _ = figure_json(s, v["fixed_pipes"])
+        fig, _ = figure_json(s, v["fixed_pipes"], blind=blind)
         return fig
+
+    @app.get("/api/samples/{sample_id}/steps")
+    def steps(sample_id: str):
+        return replay_steps(load(sample_id))
 
     @app.post("/api/samples/{sample_id}/preview")
     def preview(sample_id: str, body: Preview):
@@ -109,7 +126,7 @@ def create_app(db_path: str = "data/review.db") -> FastAPI:
         if not valid_payload(body.fixed_pipes):
             raise HTTPException(422, "fixed_pipes 格式錯誤")
         try:
-            fig, after = figure_json(s, body.fixed_pipes)
+            fig, after = figure_json(s, body.fixed_pipes, body.highlight)
         except ValueError as e:
             raise HTTPException(422, str(e)) from e
         return {"figure": fig, "violations_after": after}

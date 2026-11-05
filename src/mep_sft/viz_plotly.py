@@ -23,7 +23,13 @@ SYSTEM_COLOR = {
 MOVED_COLOR = "#2ca02c"
 BAD, GOOD = "#d62728", "#2ca02c"
 SIDES = 14
-VIEWS = {"xz": (0, "X"), "yz": (1, "Y")}  # view -> (horizontal axis index, label)
+VIEWS = {"xz": (0, "X"), "yz": (1, "Y")}  # elevation view -> (horizontal axis index, label)
+NUM = "①②③④⑤⑥⑦⑧⑨⑩"
+
+
+def num(i: int) -> str:
+    """Marker number shared by the plan view, 3D markers and the web violation list."""
+    return NUM[i] if i < len(NUM) else f"({i + 1})"
 
 
 def _cylinder(a: Vec, b: Vec, r: float):
@@ -116,9 +122,11 @@ def _opening_traces_3d(w: Wall):
 def _violation_trace(vs: list[Violation]):
     return go.Scatter3d(
         x=[v.location[0] for v in vs], y=[v.location[1] for v in vs],
-        z=[v.location[2] for v in vs], mode="markers",
-        marker={"size": 9, "color": "red", "symbol": "diamond"},
-        text=[v.message for v in vs], hoverinfo="text", name="違規", showlegend=False,
+        z=[v.location[2] for v in vs],
+        marker={"size": 9, "color": "red", "symbol": "diamond"}, mode="markers+text",
+        text=[num(i) for i in range(len(vs))], textposition="top center",
+        textfont={"color": "red", "size": 15}, hovertext=[v.message for v in vs],
+        hoverinfo="text", name="違規", showlegend=False,
     )
 
 
@@ -126,6 +134,11 @@ def _violation_trace(vs: list[Violation]):
 
 def _h(pt: Vec, view: str) -> float:
     return pt[VIEWS[view][0]]
+
+
+def _proj(pt: Vec, view: str) -> tuple[float, float]:
+    """(horizontal, vertical) drawing coordinates; "xy" is the plan view."""
+    return (pt[0], pt[1]) if view == "xy" else (_h(pt, view), pt[2])
 
 
 def _fill(xs, ys, color, name, hover, opacity=1.0):
@@ -136,24 +149,24 @@ def _fill(xs, ys, color, name, hover, opacity=1.0):
     )
 
 
-def _pipe_shapes(p: Pipe, view: str, color: str):
+def _pipe_shapes(p: Pipe, view: str, color: str, opacity: float = 1.0):
     """A pipe seen side-on is a rectangle; seen end-on it is a circle."""
     r = p.diameter / 2
     out = []
     hover = f"{p.id} {p.system} Ø{p.diameter} m"
     for a, b in zip(p.points[:-1], p.points[1:], strict=True):
-        ha, va, hb, vb = _h(a, view), a[2], _h(b, view), b[2]
+        (ha, va), (hb, vb) = _proj(a, view), _proj(b, view)
         length = math.hypot(hb - ha, vb - va)
         if length < 1e-6:  # looking down the pipe axis
             pts = [(ha + r * math.cos(t), va + r * math.sin(t))
                    for t in (2 * math.pi * k / 32 for k in range(32))]
-            out.append(_fill([q[0] for q in pts], [q[1] for q in pts], color, p.id, hover))
+            out.append(_fill([q[0] for q in pts], [q[1] for q in pts], color, p.id, hover, opacity))
             label_at = (ha, va + r)
         else:
             nh, nv = -(vb - va) / length * r, (hb - ha) / length * r
             xs = [ha + nh, hb + nh, hb - nh, ha - nh]
             ys = [va + nv, vb + nv, vb - nv, va - nv]
-            out.append(_fill(xs, ys, color, p.id, hover))
+            out.append(_fill(xs, ys, color, p.id, hover, opacity))
             label_at = ((ha + hb) / 2, max(va, vb) + r)
     out.append(
         go.Scatter(x=[label_at[0]], y=[label_at[1] + 0.04], mode="text", text=[p.id],
@@ -224,11 +237,11 @@ def _section_traces(scene: Scene, watch: list[Violation], view: str, moved: set[
     for p in scene.pipes:
         traces += _pipe_shapes(p, view, _pipe_color(p, p.id in moved))
     labels = []
-    for v in watch:
+    for i, v in enumerate(watch):
         ts, label = _dimension(scene, v, view)
         traces += ts
         if label:
-            labels.append(label)
+            labels.append((f"{num(i)} {label[0]}", label[1]))
     return traces, labels
 
 
@@ -271,22 +284,69 @@ def _style_section(fig, scene, watch, labels, view, row, col):
         )
 
 
+def _plan_traces(scene: Scene, watch: list[Violation], moved: set[str]):
+    traces = []
+    for w in scene.walls:
+        base = _wall_base(w)
+        traces.append(_fill([c[0] for c in base], [c[1] for c in base], "#bbbbbb", f"wall {w.id}",
+                            f"wall {w.id}", opacity=0.7))
+        for o in w.openings:
+            c = _opening_corners(w, o)
+            traces.append(go.Scatter(
+                x=[c[0][0], c[1][0]], y=[c[0][1], c[1][1]], mode="lines",
+                line={"color": "#ff7f0e", "width": 6}, hovertext=f"{w.id} 開口", hoverinfo="text",
+                showlegend=False,
+            ))
+    for p in scene.pipes:
+        traces += _pipe_shapes(p, "xy", _pipe_color(p, p.id in moved), opacity=0.8)
+    if watch:
+        traces.append(go.Scatter(
+            x=[v.location[0] for v in watch], y=[v.location[1] for v in watch],
+            mode="markers+text", text=[num(i) for i in range(len(watch))],
+            textposition="top right", textfont={"color": BAD, "size": 15},
+            marker={"size": 11, "color": BAD, "symbol": "diamond"},
+            hovertext=[v.message for v in watch], hoverinfo="text", showlegend=False,
+        ))
+    return traces
+
+
+def _style_plan(fig, scene: Scene, row: int, col: int):
+    sp = fig.get_subplot(row, col)
+    xa = sp.xaxis.plotly_name.replace("axis", "")
+    xs = [c[0] for w in scene.walls for c in _wall_base(w)] + [
+        pt[0] for p in scene.pipes for pt in p.points]
+    ys = [c[1] for w in scene.walls for c in _wall_base(w)] + [
+        pt[1] for p in scene.pipes for pt in p.points]
+    fig.update_xaxes(range=[min(xs) - 0.5, max(xs) + 0.5], title_text="X (m)", row=row, col=col)
+    fig.update_yaxes(range=[min(ys) - 0.5, max(ys) + 0.5], title_text="Y (m)", scaleanchor=xa,
+                     scaleratio=1, row=row, col=col)
+
+
 def build_figure(
     before: Scene, before_violations: list[Violation],
     after: Scene, after_violations: list[Violation],
-    moved: set[str], title: str = "MEP 修正前後",
+    moved: set[str], title: str = "MEP 修正前後", blind: bool = False,
 ) -> go.Figure:
-    s3d = {"type": "scene"}
-    xy = {"type": "xy"}
-    fig = make_subplots(
-        rows=3, cols=2, row_heights=[0.5, 0.25, 0.25], vertical_spacing=0.06,
-        specs=[[s3d, s3d], [xy, xy], [xy, xy]],
-        subplot_titles=(
+    """Rows: 3D, plan, elevation along Y, elevation along X; columns: before / after.
+
+    blind=True hides every hint (counts, markers, dimensions) for the quiz mode: the caller
+    passes empty violation lists and the titles stop saying what is wrong.
+    """
+    s3d, xy = {"type": "scene"}, {"type": "xy"}
+    if blind:
+        titles = ("3D 立體圖", "3D 立體圖（同左）", "平面圖（從上往下看）", "平面圖（同左）",
+                  "立面圖（沿 Y 看）", "立面圖（同左）", "立面圖（沿 X 看）", "立面圖（同左）")
+    else:
+        titles = (
             f"3D 修正前（違規 {len(before_violations)}）",
             f"3D 修正後（違規 {len(after_violations)}；綠色＝被移動）",
+            "平面圖（從上往下看）修正前", "平面圖 修正後",
             "立面圖（沿 Y 看）修正前", "立面圖（沿 Y 看）修正後",
             "立面圖（沿 X 看）修正前", "立面圖（沿 X 看）修正後",
-        ),
+        )
+    fig = make_subplots(
+        rows=4, cols=2, row_heights=[0.34, 0.26, 0.2, 0.2], vertical_spacing=0.05,
+        specs=[[s3d, s3d], [xy, xy], [xy, xy], [xy, xy]], subplot_titles=titles,
     )
     for col, (scene, vs, mv) in enumerate(
         ((before, before_violations, set()), (after, after_violations, moved)), start=1
@@ -300,7 +360,11 @@ def build_figure(
                 fig.add_trace(t, row=1, col=col)
         if vs:
             fig.add_trace(_violation_trace(vs), row=1, col=col)
-        for row, view in ((2, "xz"), (3, "yz")):
+        # plan markers: the violations of this very scene, numbered like the "before" list
+        for t in _plan_traces(scene, vs if col == 1 else [], mv):
+            fig.add_trace(t, row=2, col=col)
+        _style_plan(fig, scene, 2, col)
+        for row, view in ((3, "xz"), (4, "yz")):
             # dimensions track the originally-violating measurements, so "after" shows them passing
             traces, labels = _section_traces(scene, before_violations, view, mv)
             for t in traces:
@@ -314,7 +378,7 @@ def build_figure(
                 "camera": {"eye": {"x": 1.4, "y": -1.6, "z": 0.7}},
             }
         })
-    fig.update_layout(title=title, height=1500, margin={"l": 40, "r": 20, "t": 70, "b": 30})
+    fig.update_layout(title=title, height=1900, margin={"l": 40, "r": 20, "t": 70, "b": 30})
     return fig
 
 

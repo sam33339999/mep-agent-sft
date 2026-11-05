@@ -289,3 +289,8 @@ def assemble_file(raw: Path, out: Path, include_meta: bool = True) -> int:
             w.write(json.dumps(rec, ensure_ascii=False, sort_keys=True) + "\n")
             count += 1
     return count
+
+
+# public names for the review server's step-by-step replay
+action_text = _action_text
+priority_sentence = _priority_sentence

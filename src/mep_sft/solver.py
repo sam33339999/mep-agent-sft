@@ -47,6 +47,7 @@ class Action:
     ids: list[str] = field(default_factory=list)  # elements involved in that violation
     # strategies passed over first: {"pipe_id", "strategy", "reason": fixed_ends | no_improvement}
     skipped: list[dict] = field(default_factory=list)
+    points: list = field(default_factory=list)  # the pipe's full path after this action
 
 
 @dataclass
@@ -215,7 +216,8 @@ def solve(scene: Scene, max_iter: int = 30) -> SolveResult:
                 if hit:
                     actions.append(
                         Action(strategy, pid, hit[1], target.message, len(vs), hit[0],
-                               target.type, list(target.ids), skipped)
+                               target.type, list(target.ids), skipped,
+                               [list(q) for q in hit[2].pipe(pid).points])
                     )
                     break
                 skipped.append({"pipe_id": pid, "strategy": strategy, "reason": "no_improvement"})

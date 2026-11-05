@@ -43,6 +43,18 @@
   textarea { width:100%; font-family:ui-monospace,Menlo,monospace; font-size:12.5px; }
   .actions { display:flex; gap:8px; flex-wrap:wrap; margin-top:8px; align-items:center; }
   .muted { color:var(--mute); } #empty { margin-top:30vh; text-align:center; color:var(--mute); }
+  details.learn { background:var(--panel); border:1px solid var(--line); border-radius:8px;
+          padding:6px 12px; margin:10px 0; } details.learn summary { cursor:pointer; font-weight:600; }
+  dl.gl { display:grid; grid-template-columns:120px 1fr; gap:4px 12px; margin:8px 0 4px; }
+  dl.gl dt { font-weight:600; } dl.gl dd { margin:0; color:var(--mute); }
+  ol.how { margin:6px 0 2px; padding-left:20px; }
+  li.vi { cursor:pointer; margin:2px 0; } li.vi:hover { text-decoration:underline; }
+  li.vi.on { font-weight:600; }
+  .explain h4 { margin:0 0 6px; } .explain p { margin:4px 0; }
+  .explain b { color:var(--accent); }
+  .steps .txt { margin:8px 0; min-height:42px; } .steps .meta { color:var(--mute); }
+  .quizbox label { margin-right:14px; } .banner { padding:8px 12px; border-radius:8px; margin:8px 0;
+          background:var(--panel); border:1px solid var(--line); }
   #toast { position:fixed; right:16px; bottom:16px; background:var(--text); color:var(--bg);
            padding:8px 14px; border-radius:8px; opacity:0; transition:opacity .2s; }
 </style>
@@ -55,6 +67,7 @@
       <select id="diff"><option value="">全部難度</option>
         <option>1</option><option>2</option><option>3</option><option>4</option></select>
       <a href="/api/export" download="sft.jsonl">匯出已核准 JSONL</a>
+      <label title="先隱藏所有違規提示，自己找問題，再揭曉答案"><input type="checkbox" id="quiz"> 測驗模式</label>
     </div>
     <div class="bar">
       <span class="muted">數量</span><input id="gn" type="number" value="10" min="1" max="500" style="width:62px">
@@ -72,9 +85,34 @@
 <script>
 const $ = (s) => document.querySelector(s);
 const STATUS = { pending: "待審", approved: "已核准", rejected: "已退回" };
-const TYPE = { clash: "碰撞", wall_penetration: "穿牆", clear_height: "淨高",
-               drain_slope: "坡度" };
-let state = { status: "pending", cur: null };
+const TYPE = { clash: "碰撞", wall_penetration: "穿牆", clear_height: "淨高", drain_slope: "坡度" };
+const NUM = "①②③④⑤⑥⑦⑧⑨⑩";
+const num = (i) => (i < NUM.length ? NUM[i] : `(${i + 1})`);
+let state = { status: "pending", cur: null, quiz: false, revealed: new Set(), banner: null };
+
+const GLOSSARY = [
+  ["MEP", "機械 (Mechanical)、電氣 (Electrical)、管道 (Plumbing) 三類設備的統稱。這裡的管線分四個系統。"],
+  ["系統顏色", "給水＝藍、排水＝棕、風管＝灰、電氣＝黃。綠色代表這次被移動的管線。"],
+  ["標高 Z", "離樓板的高度（公尺）。立面圖的縱軸就是標高。"],
+  ["淨高", "人走過去頭上要留的空間。這裡定義為「管底標高 ≥ 淨高線」，圖上是橘色虛線。"],
+  ["管底 / 管頂", "管中心標高 ∓ 外半徑。判斷淨高看管底、判斷頂到天花板看管頂。"],
+  ["外半徑", "管徑 ÷ 2 + 保溫厚。兩條管能不能靠近，比的是外緣，不是管本身。"],
+  ["外緣間距", "兩條管外表面之間的空隙；負數代表互相穿入。規則要求至少一個最小間隙。"],
+  ["碰撞 clash", "兩條管外緣間距不足。MEP 協調最常見的問題。"],
+  ["開口 / 套管", "牆上預留給管線穿過的洞。沒有預留就不能穿牆。平面圖是橘線，立面圖是白色矩形。"],
+  ["排水坡度", "排水靠重力流：高差 ÷ 水平距離。太平積水、反坡倒流、太陡水流過快。"],
+  ["平面圖", "從上往下看，讀的是 X-Y 位置：管線在哪、跟牆的關係。"],
+  ["立面圖", "從側面看，讀的是高低（Z）與間距。這裡是把所有東西投影到一個面，並非真的切開。"],
+  ["兩端固定", "管線兩端接設備，不能整條平移，只能在中間繞道。"],
+  ["繞道 jog", "在違規處讓管線拐出去再回來，兩端位置不變。"],
+];
+const HOWTO = [
+  "先看平面圖：找紅色編號（①②…），知道問題發生在哪個位置、牽涉哪些管。",
+  "再看立面圖：同一個位置，上下的高度差和尺寸線才看得出碰撞或淨高問題。",
+  "點下方的違規項目，會用白話列出「量到什麼、規則要求多少、為什麼是問題」。",
+  "看修正後：尺寸線與標示變綠（✓）就是合格；綠色管線是被移動的那條。",
+  "想看過程可用「逐步導覽」；想自己練習就開啟「測驗模式」。",
+];
 
 function el(tag, props = {}, ...kids) {
   const e = Object.assign(document.createElement(tag), props);
@@ -101,8 +139,7 @@ function renderTabs() {
   }
 }
 async function loadStats() {
-  const s = await api("/api/stats");
-  const b = s.by_status;
+  const b = (await api("/api/stats")).by_status;
   $("#stats").textContent = `待審 ${b.pending ?? 0}・核准 ${b.approved ?? 0}・退回 ${b.rejected ?? 0}`;
 }
 async function loadList() {
@@ -111,27 +148,79 @@ async function loadList() {
   const box = $("#list"); box.replaceChildren();
   if (!items.length) box.append(el("div", { className: "bar muted", textContent: "沒有樣本" }));
   for (const s of items) {
+    const hide = state.quiz && !state.revealed.has(s.id); // quiz: chips would give the answer away
     box.append(el("div", { className: "item" + (state.cur?.id === s.id ? " sel" : ""),
       onclick: () => { location.hash = s.id; openSample(s.id); } },
       el("div", { className: "t", textContent: s.id }),
       el("span", { className: "chip", textContent: "難度 " + s.difficulty }),
-      s.issue_types.length
+      hide ? [] : s.issue_types.length
         ? s.issue_types.map((t) => el("span", { className: "chip", textContent: TYPE[t] }))
         : el("span", { className: "chip", textContent: "無違規" })));
   }
   loadStats();
 }
 
-function vlist(vs, emptyText) {
+function learnPanel() {
+  return el("details", { className: "learn" },
+    el("summary", { textContent: "📖 怎麼看圖與名詞表" }),
+    el("ol", { className: "how" }, HOWTO.map((t) => el("li", { textContent: t }))),
+    el("dl", { className: "gl" }, GLOSSARY.map(([k, v]) => [el("dt", { textContent: k }), el("dd", { textContent: v })])));
+}
+
+function vlist(vs, expl, emptyText, numbered, target) {
   if (!vs || !vs.length) return el("div", { className: "ok", textContent: emptyText });
-  return el("ul", { className: "v" }, vs.map((v) => el("li", { className: "bad", textContent: v.message })));
+  return el("ul", { className: "v", style: numbered ? "list-style:none;padding-left:0" : "" },
+    vs.map((v, i) => el("li", { className: "vi bad", title: "點一下看白話解說",
+      textContent: (numbered ? num(i) + " " : "") + v.message,
+      onclick: (e) => showExplain(expl[i], e.currentTarget) })));
+}
+function showExplain(x, li) {
+  document.querySelectorAll("li.vi.on").forEach((n) => n.classList.remove("on"));
+  li?.classList.add("on");
+  const box = $("#explain");
+  box.replaceChildren(el("div", { className: "explain" },
+    el("h4", { textContent: x.title }),
+    el("p", {}, el("b", { textContent: "怎麼算：" }), x.calc),
+    el("p", {}, el("b", { textContent: "代表什麼：" }), x.meaning),
+    el("p", {}, el("b", { textContent: "圖上怎麼看：" }), x.look)));
 }
 
 async function openSample(id) {
+  if (state.quiz && !state.revealed.has(id)) return renderQuiz(id);
+  return renderFull(id);
+}
+
+async function renderQuiz(id) {
   const s = await api("/api/samples/" + id);
   state.cur = s;
-  const cur = s.current;
-  const sc = s.status_check;
+  const boxes = Object.entries(TYPE).map(([k, label]) =>
+    el("label", {}, el("input", { type: "checkbox", value: k }), " " + label));
+  $("#main").replaceChildren(
+    el("h2", { textContent: `${s.id}（測驗模式）` }),
+    el("div", { className: "muted", textContent: "先不要看答案：用平面圖與立面圖找出這個場景有哪些問題。" }),
+    el("div", { id: "fig", style: "height:1900px;margin-top:8px" }),
+    el("div", { className: "card quizbox" }, el("h3", { textContent: "你找到哪些問題？（可複選；沒有問題就都不勾）" }),
+      boxes, el("div", { className: "actions" },
+        el("button", { className: "primary", textContent: "揭曉答案", onclick: () => reveal(s) }))));
+  Plotly.react("fig", ...Object.values((({ data, layout }) => ({ data, layout }))(await api(`/api/samples/${id}/figure?blind=true`))), { responsive: true });
+  loadList();
+}
+function reveal(s) {
+  const picked = [...document.querySelectorAll(".quizbox input:checked")].map((i) => i.value).sort();
+  const truth = [...s.issue_types].sort();
+  const hit = picked.filter((x) => truth.includes(x)), miss = truth.filter((x) => !picked.includes(x));
+  const wrong = picked.filter((x) => !truth.includes(x));
+  const names = (a) => (a.length ? a.map((x) => TYPE[x]).join("、") : "無");
+  state.banner = (!miss.length && !wrong.length ? "✓ 全對！" : "結果：") +
+    ` 正確答案 ${names(truth)}；你答對 ${names(hit)}；漏掉 ${names(miss)}；多選 ${names(wrong)}。`;
+  state.revealed.add(s.id);
+  renderFull(s.id);
+}
+
+async function renderFull(id) {
+  const s = await api("/api/samples/" + id);
+  state.cur = s;
+  const cur = s.current, sc = s.status_check;
   const pipesBox = el("textarea", { id: "pipes", rows: 8, value: JSON.stringify(cur.fixed_pipes, null, 1) });
   const textBox = el("textarea", { id: "text", rows: 14, value: cur.assistant_text });
   const regen = el("input", { type: "checkbox", id: "regen", checked: true });
@@ -141,16 +230,22 @@ async function openSample(id) {
   const verSel = el("select", { onchange: async (e) => draw(await api(`/api/samples/${id}/figure?version=${e.target.value}`)) },
     s.versions.map((v) => el("option", { value: v.version, selected: v.version === cur.version,
       textContent: `v${v.version} · ${v.source}` })));
+  const banner = state.banner ? el("div", { className: "banner", textContent: state.banner }) : "";
+  state.banner = null;
   $("#main").replaceChildren(
     el("h2", {}, s.id, " ", el("span", { className: "st-" + s.status, textContent: STATUS[s.status] })),
     el("div", { className: "muted", textContent:
       `難度 ${s.difficulty}・題型 ${s.variant}・seed ${s.seed}・目前 v${cur.version}（${cur.source}）` }),
-    el("div", { id: "fig", style: "height:1500px;margin-top:8px" }),
+    banner, learnPanel(),
+    el("div", { id: "fig", style: "height:1900px;margin-top:8px" }),
     el("div", { className: "row" },
-      el("div", { className: "col card" }, el("h3", {}, "原場景的違規"),
-        vlist(s.violations, "無違規（此題答案應為「無需修正」）")),
+      el("div", { className: "col card" }, el("h3", {}, "原場景的違規（編號對應圖上的紅色標記，點一下看解說）"),
+        vlist(s.violations, s.explain_before, "無違規（此題答案應為「無需修正」）", true)),
       el("div", { className: "col card" }, el("h3", {}, "目前答案套用後的違規"),
-        el("div", { id: "after" }, vlist(s.violations_after, "✓ 已無違規")))),
+        el("div", { id: "after" }, vlist(s.violations_after, s.explain_after, "✓ 已無違規", false)))),
+    el("div", { id: "explain", className: "card", style: "margin-top:12px" },
+      el("span", { className: "muted", textContent: "點上方任一項違規，這裡會用白話說明量到什麼、為什麼是問題、圖上怎麼看。" })),
+    el("div", { id: "steps" }),
     el("h3", {}, "答案檢查"), check,
     el("h3", {}, "微調修正（有修改的管線完整路徑）"), pipesBox,
     el("div", { className: "actions" },
@@ -166,7 +261,32 @@ async function openSample(id) {
     el("h3", {}, "送給模型的題目"),
     el("pre", { className: "card", style: "white-space:pre-wrap", textContent: s.system + "\n\n" + s.user }));
   draw(await api(`/api/samples/${id}/figure`));
+  loadSteps(id, cur);
   loadList();
+}
+
+async function loadSteps(id, cur) {
+  const steps = await api(`/api/samples/${id}/steps`);
+  const box = $("#steps");
+  if (steps.length < 2 || cur.source !== "auto") return; // hand-edited answers have no solver trace
+  let i = 0;
+  const txt = el("div", { className: "txt" }), meta = el("div", { className: "meta" });
+  const show = async (n) => {
+    i = Math.max(0, Math.min(steps.length - 1, n));
+    const st = steps[i];
+    txt.textContent = (i ? `第 ${i} 步：` : "") + st.text;
+    meta.textContent = `步驟 ${i} / ${steps.length - 1}・剩餘違規 ${st.violations}` + (st.highlight.length ? `・本步移動 ${st.highlight.join("、")}` : "");
+    const r = await api(`/api/samples/${id}/preview`, { method: "POST",
+      body: { fixed_pipes: st.fixed_pipes, highlight: st.highlight } });
+    draw(r.figure);
+  };
+  box.replaceChildren(el("div", { className: "card steps", style: "margin-top:12px" },
+    el("h3", { style: "margin-top:0", textContent: "逐步導覽：solver 是怎麼一步步修的" }),
+    meta, txt, el("div", { className: "actions" },
+      el("button", { textContent: "◀ 上一步", onclick: () => show(i - 1) }),
+      el("button", { className: "primary", textContent: "下一步 ▶", onclick: () => show(i + 1) }),
+      el("button", { textContent: "回到最終答案", onclick: async () => draw(await api(`/api/samples/${id}/figure`)) }))));
+  meta.textContent = `步驟 0 / ${steps.length - 1}・原始場景`; txt.textContent = steps[0].text;
 }
 function draw(fig) { Plotly.react("fig", fig.data, fig.layout, { responsive: true }); }
 
@@ -175,7 +295,7 @@ async function preview() {
     const pipes = JSON.parse($("#pipes").value);
     const r = await api(`/api/samples/${state.cur.id}/preview`, { method: "POST", body: { fixed_pipes: pipes } });
     draw(r.figure);
-    $("#after").replaceChildren(vlist(r.violations_after, "✓ 已無違規"));
+    $("#after").replaceChildren(vlist(r.violations_after, [], "✓ 已無違規", false));
   } catch (e) { toast("預覽失敗：" + e.message); }
 }
 async function saveVersion() {
@@ -184,7 +304,7 @@ async function saveVersion() {
     const body = { fixed_pipes: pipes, regenerate_text: $("#regen").checked };
     if ($("#text").value !== state.cur.current.assistant_text) body.assistant_text = $("#text").value;
     const r = await api(`/api/samples/${state.cur.id}/versions`, { method: "POST", body });
-    toast(`已存成 v${r.version}`); openSample(state.cur.id);
+    toast(`已存成 v${r.version}`); renderFull(state.cur.id);
   } catch (e) { toast("儲存失敗：" + e.message); }
 }
 async function review(decision, override = false) {
@@ -192,7 +312,7 @@ async function review(decision, override = false) {
   try {
     await api(`/api/samples/${state.cur.id}/review`, { method: "POST", body: { decision, reason, override } });
     toast(STATUS[{ approve: "approved", reject: "rejected", reset: "pending" }[decision]]);
-    openSample(state.cur.id);
+    renderFull(state.cur.id);
   } catch (e) {
     if (e.status === 409 && confirm("答案未通過檢查：\n" + e.data.detail.problems.join("\n") +
         "\n\n要強制核准嗎？（需填寫原因）")) return review(decision, true);
@@ -209,6 +329,7 @@ $("#gen").onclick = async () => {
   $("#gen").disabled = false;
 };
 $("#diff").onchange = loadList;
+$("#quiz").onchange = (e) => { state.quiz = e.target.checked; loadList(); if (state.cur) openSample(state.cur.id); };
 renderTabs(); loadList();
 if (location.hash.length > 1) openSample(decodeURIComponent(location.hash.slice(1)));
 </script>

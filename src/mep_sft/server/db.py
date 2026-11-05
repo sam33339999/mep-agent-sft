@@ -11,6 +11,7 @@ SCHEMA = """
 CREATE TABLE IF NOT EXISTS samples (
   id TEXT PRIMARY KEY, seed INTEGER, difficulty INTEGER, variant TEXT,
   scene_hash TEXT UNIQUE, scene_json TEXT, issue_types TEXT, violations_json TEXT,
+  actions_json TEXT DEFAULT '[]',
   status TEXT NOT NULL DEFAULT 'pending', approved_version INTEGER, created_at TEXT
 );
 CREATE TABLE IF NOT EXISTS versions (
@@ -36,6 +37,9 @@ class Store:
         self.lock = threading.RLock()
         with self.lock:
             self.db.executescript(SCHEMA)
+            cols = {r["name"] for r in self.db.execute("PRAGMA table_info(samples)")}
+            if "actions_json" not in cols:  # database created before step-by-step replay existed
+                self.db.execute("ALTER TABLE samples ADD COLUMN actions_json TEXT DEFAULT '[]'")
 
     # -- samples
     def add_sample(self, sample: dict, variant: str, fixed_pipes: list, text: str) -> bool:
@@ -49,11 +53,11 @@ class Store:
             ts = now()
             self.db.execute(
                 "INSERT INTO samples (id, seed, difficulty, variant, scene_hash, scene_json,"
-                " issue_types, violations_json, created_at) VALUES (?,?,?,?,?,?,?,?,?)",
+                " issue_types, violations_json, created_at, actions_json) VALUES (?,?,?,?,?,?,?,?,?,?)",
                 (sample["id"], sample["seed"], sample["difficulty"], variant,
                  sample["scene_hash"], json.dumps(sample["scene"], sort_keys=True),
                  json.dumps(sorted({v["type"] for v in sample["violations"]})),
-                 json.dumps(sample["violations"]), ts),
+                 json.dumps(sample["violations"]), ts, json.dumps(sample.get("actions", []))),
             )
             self.db.execute(
                 "INSERT INTO versions VALUES (?,?,?,?,?,?,?)",
@@ -92,6 +96,7 @@ class Store:
         out = self._summary(r)
         out["scene"] = json.loads(r["scene_json"])
         out["violations"] = json.loads(r["violations_json"])
+        out["actions"] = json.loads(r["actions_json"] or "[]")
         out["scene_hash"] = r["scene_hash"]
         return out
 
