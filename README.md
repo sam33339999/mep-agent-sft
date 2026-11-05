@@ -55,6 +55,13 @@ generator → scene ─┬→ rules → violations ─┐
 （LLaMA-Factory、Axolotl、Unsloth 都是這條路）。`--dataset-info` 會寫出 LLaMA-Factory 用的設定片段
 （OpenAI messages 格式，`formatting: sharegpt`）。`assemble --no-meta` 可輸出只含 `messages` 的檔案。
 
+### 已實際驗證過的訓練流程
+
+用 LLaMA-Factory 0.9.5 讀取 200 筆樣本（`qwen3` 範本），平均 1323 個 token、最長 3024、沒有被截斷，loss
+只算 assistant 部分（從 `<think>` 開始）。接著在 RTX 3090 上用 Qwen3-0.6B + LoRA 跑 20 步（約 33 秒），
+loss 由 1.17 降到 0.30，adapter 正常存檔。**這只證明資料能走完整條訓練路徑，並不代表模型學會了任務**；
+要知道訓練有沒有用，請用 `eval` 對訓練後的模型輸出打分。設定檔見 `examples/llamafactory_sft.yaml`。
+
 ## 多樓層
 
 難度 4 會建兩層樓（每層 3.2 m 一層）。管線有所屬樓層，淨高與天花板限制從該層樓板起算；題目文字會列出
@@ -64,6 +71,6 @@ generator → scene ─┬→ rules → violations ─┐
 
 - 牆穿透的修法有「沿牆滑到開口」與「在牆前截短（保留較長一側，至少 0.5 m）」；沒有「新增開口」這個動作。
 - 牆開口只在穿牆中點檢查；斜穿牆可能有誤差。
-- 難度 3、4 的 solver 解出率偏低（約 43%、26%），無解場景會被丟棄並記錄在統計。
-- 尚未實際用 LLaMA-Factory 跑過訓練（只驗證 HF datasets 能載入、格式符合其 messages 規格）。
+- 難度 3、4 的 solver 解出率約 76%、59%；其餘是擁擠到無法收斂的場景，會被丟棄並記錄在統計。
+- 新增牆開口只允許用在標示「可新增開口」的牆（內牆）；外牆視為結構牆，不能新增。
 - IFC 以 ifcopenshell 幾何引擎驗證過座標與開口體積，但未用 BlenderBIM 實際開啟。

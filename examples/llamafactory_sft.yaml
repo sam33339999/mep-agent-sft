@@ -1,0 +1,28 @@
+# LLaMA-Factory SFT config verified against this project's data (LLaMA-Factory 0.9.5, torch 2.14 + CUDA).
+# 1) uv run python -m mep_sft generate --n 200 --seed 0 --out data/raw.jsonl
+# 2) uv run python -m mep_sft assemble --raw data/raw.jsonl --out data/train.jsonl
+# 3) uv run python -m mep_sft validate --train data/train.jsonl --dataset-info data/dataset_info.json
+# 4) llamafactory-cli train examples/llamafactory_sft.yaml        (run from the repo root)
+model_name_or_path: Qwen/Qwen3-0.6B
+stage: sft
+do_train: true
+finetuning_type: lora
+lora_target: all
+lora_rank: 16
+dataset: mep_sft
+dataset_dir: data              # holds train.jsonl + dataset_info.json (written by `validate`)
+template: qwen3                # reasoning template: keeps the <think> block in the target
+cutoff_len: 4096               # longest sample in a 200-sample mix is ~3000 tokens
+max_samples: 200
+overwrite_cache: true
+preprocessing_num_workers: 2
+output_dir: outputs/mep_sft_lora
+overwrite_output_dir: true
+per_device_train_batch_size: 2
+gradient_accumulation_steps: 2
+learning_rate: 2.0e-4
+max_steps: 20                  # smoke test; use num_train_epochs for a real run
+logging_steps: 2
+save_steps: 100000
+report_to: none
+bf16: true
