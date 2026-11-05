@@ -1,0 +1,32 @@
+# Experiment 2: the SAME 700 scenes and training settings as experiment 1 (examples/llamafactory_exp1.yaml);
+# only the assistant text differs (fix_full reasoning shows the arithmetic of every step), cutoff 4096 -> 4608
+# so that no longer sample is truncated. Rebuild the training file from the same raw scenes:
+#   uv run python -m mep_sft assemble --raw data/exp1/train_raw.jsonl --out data/exp2/train.jsonl
+#   uv run python -m mep_sft validate --train data/exp2/train.jsonl --dataset-info data/exp2/dataset_info.json
+#   llamafactory-cli train examples/llamafactory_exp2.yaml
+#   python examples/generate_answers.py --raw data/exp1/val_raw.jsonl --out preds.jsonl --adapter data/exp2/lora --max-new 2600
+model_name_or_path: Qwen/Qwen3-0.6B
+stage: sft
+do_train: true
+finetuning_type: lora
+lora_target: all
+lora_rank: 32
+lora_alpha: 64
+dataset: mep_sft
+dataset_dir: data/exp2             # train.jsonl + dataset_info.json (see steps below)
+template: qwen3
+cutoff_len: 4608
+overwrite_cache: true
+preprocessing_num_workers: 4
+output_dir: data/exp2/lora
+overwrite_output_dir: data/exp2/lora
+per_device_train_batch_size: 1
+gradient_accumulation_steps: 8
+learning_rate: 2.0e-4
+num_train_epochs: 3
+lr_scheduler_type: cosine
+warmup_ratio: 0.05
+logging_steps: 10
+save_steps: 100000
+report_to: none
+bf16: true
