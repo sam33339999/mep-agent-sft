@@ -21,7 +21,7 @@ cutoff_len: 4096
 overwrite_cache: true
 preprocessing_num_workers: 4
 output_dir: data/exp1/lora
-overwrite_output_dir: data/exp1/lora
+overwrite_output_dir: true
 per_device_train_batch_size: 1
 gradient_accumulation_steps: 8
 learning_rate: 2.0e-4
