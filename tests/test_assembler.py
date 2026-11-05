@@ -85,3 +85,25 @@ def test_think_never_contradicts_actions():
         think = _answer(assemble(s, "fix_full")).split("</think>")[0]
         for a in s["actions"]:
             assert a["pipe_id"] in think
+
+
+def test_reasons_only_quote_the_violations_listed_in_the_prompt():
+    for s in SAMPLES:
+        text = _answer(assemble(s, "fix_full"))
+        if "理由：" not in text:
+            continue
+        reasons = text.split("理由：")[1].split("```json")[0]
+        for v in s["violations"]:
+            assert v["message"] in reasons
+        # nothing but the original violations (no intermediate solver states)
+        assert reasons.count("；") == len(s["violations"]) - 1
+
+
+def test_new_wall_actions_are_described():
+    from mep_sft.assembler import action_text
+    from mep_sft.demo import opening
+    from mep_sft.solver import solve as solve_scene
+    res = solve_scene(opening())
+    a = res.actions[0]
+    d = {"kind": a.kind, "pipe_id": a.pipe_id, "detail": a.detail, "ids": a.ids}
+    assert "開口" in action_text(opening(), res.fixed, d)

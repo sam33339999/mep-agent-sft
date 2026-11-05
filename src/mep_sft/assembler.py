@@ -137,7 +137,7 @@ def _priority_sentence(scene: Scene, a: dict) -> str:
 
 STRATEGY_ZH = {
     "shift_z": "垂直位移", "shift_xy": "水平平移", "jog_z": "垂直繞道", "jog_xy": "水平繞道",
-    "reslope": "調整坡度",
+    "reslope": "調整坡度", "slide_wall": "沿牆滑動對準開口", "trim": "截短管線",
 }
 
 
@@ -151,6 +151,15 @@ def _action_text(scene: Scene, fixed: Scene, a: dict) -> str:
     k = a["kind"]
     if k == "shift_z":
         return f"將 {pid} 整條{_dir(d['dz'], '上移', '下移')} {n(abs(d['dz']))} m"
+    if k == "slide_wall":
+        moves = [f"{_dir(d[ax], plus, minus)} 平移 {n(abs(d[ax]))} m"
+                 for ax, plus, minus in (("dx", "往 +X", "往 -X"), ("dy", "往 +Y", "往 -Y")) if d[ax]]
+        return f"將 {pid} 整條沿牆{'、'.join(moves)}，讓它穿過牆上的開口"
+    if k == "trim":
+        wall = a["ids"][1] if len(a["ids"]) > 1 else "牆"
+        side = "起點側" if d["keep"] == "start" else "終點側"
+        return (f"在牆 {wall} 前把 {pid} 截短，保留{side}，新端點 {pt(d['end'])}"
+                f"（移除穿牆的 {n(d['removed'])} m）")
     if k == "shift_xy":
         moves = []
         if d["dx"]:
@@ -235,13 +244,8 @@ def _fix_answer(sample: dict, scene: Scene, fixed: Scene, with_reason: bool) -> 
         lines.append(f"- 管線 {p.id}：改為 {path(p.points)}")
     lines.append(f"- 其餘 {len(scene.pipes) - len(changed)} 條管線維持原位")
     if with_reason:
-        seen, reasons = set(), []
-        for msg in [a["resolved"] for a in sample["actions"]] or [
-            v["message"] for v in sample["violations"]
-        ]:
-            if msg not in seen:
-                seen.add(msg)
-                reasons.append(msg)
+        # the violations as stated in the prompt (not the intermediate states between solver steps)
+        reasons = [v["message"] for v in sample["violations"]]
         lines.append("理由：" + "；".join(reasons) + "。上述修改後，重新檢查已無任何違規。")
     return "\n".join(lines) + "\n" + render_block({"fixed_pipes": fixed_pipes_payload(scene, fixed)})
 

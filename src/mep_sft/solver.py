@@ -13,7 +13,7 @@ import math
 from dataclasses import dataclass, field, replace
 from itertools import pairwise
 
-from .rules import CLASH, CLEAR, SLOPE, WALL, Violation, check_all
+from .rules import CLASH, CLEAR, SLOPE, WALL, Violation, _wall_local, check_all
 from .scene import SYSTEM_PRIORITY, Pipe, Scene, r4
 
 STEP = 0.05
@@ -37,7 +37,7 @@ SHIFT_XY = [
 
 @dataclass
 class Action:
-    kind: str  # shift_z | shift_xy | jog_z | jog_xy | reslope
+    kind: str  # shift_z | shift_xy | jog_z | jog_xy | reslope | slide_wall | trim
     pipe_id: str
     detail: dict
     resolved: str  # message of the violation that triggered it
@@ -145,6 +145,54 @@ def _jog_xy(p, v, scene):
     return _jog(p, v, scene, "xy")
 
 
+def _slide_wall(p: Pipe, v: Violation, scene: Scene):
+    """Slide the whole pipe along the wall: only helps when it lands in an opening."""
+    wall = next(w for w in scene.walls if w.id == v.ids[1])
+    dx, dy = wall.p1[0] - wall.p0[0], wall.p1[1] - wall.p0[1]
+    if abs(dy) < 1e-9:
+        steps = [(s_ * k * STEP, 0.0) for k in range(1, round(MAX_SHIFT / STEP) + 1) for s_ in (1, -1)]
+    elif abs(dx) < 1e-9:
+        steps = [(0.0, s_ * k * STEP) for k in range(1, round(MAX_SHIFT / STEP) + 1) for s_ in (1, -1)]
+    else:
+        return
+    for mx, my in steps:
+        yield {"dx": r4(mx), "dy": r4(my)}, [(r4(x + mx), r4(y + my), z) for x, y, z in p.points]
+
+
+MIN_KEEP = 0.5  # a trimmed pipe must stay at least this long
+
+
+def _trim(p: Pipe, v: Violation, scene: Scene):
+    """Cut the pipe short in front of the wall, keeping the longer side."""
+    wall = next(w for w in scene.walls if w.id == v.ids[1])
+    i, _ = _nearest_segment(p, v.location)
+    a, b = p.points[i], p.points[i + 1]
+    ya, yb = _wall_local(wall, a)[1], _wall_local(wall, b)[1]
+    if ya * yb >= 0:  # never crosses the wall's mid-plane
+        return
+    t = ya / (ya - yb)
+    seg = [b[k] - a[k] for k in range(3)]
+    seg_len = math.sqrt(sum(c * c for c in seg))
+    u = [c / seg_len for c in seg]
+    before = sum(math.dist(q, r) for q, r in pairwise(p.points[: i + 1])) + t * seg_len
+    total = sum(math.dist(q, r) for q, r in pairwise(p.points))
+    after = total - before
+    cut = _snap_up(wall.thickness / 2 + p.outer_radius + 0.05)
+    cross = [a[k] + seg[k] * t for k in range(3)]
+    if before >= after:  # keep the start side
+        end = tuple(r4(cross[k] - u[k] * cut) for k in range(3))
+        pts = list(p.points[: i + 1]) + [end]
+        kept, keep = before - cut, "start"
+    else:
+        end = tuple(r4(cross[k] + u[k] * cut) for k in range(3))
+        pts = [end] + list(p.points[i + 1 :])
+        kept, keep = after - cut, "end"
+    pts = [q for k, q in enumerate(pts) if k == 0 or q != pts[k - 1]]
+    if kept < MIN_KEEP or len(pts) < 2:
+        return
+    yield {"keep": keep, "end": list(end), "removed": r4(total - kept)}, pts
+
+
 def _reslope(p: Pipe, v: Violation, scene: Scene):
     """Keep the upstream end and lower the downstream end, or keep the downstream end and raise
     the upstream end. Vertical drops are left untouched."""
@@ -171,17 +219,17 @@ def _reslope(p: Pipe, v: Violation, scene: Scene):
 
 STRATEGIES = {
     "shift_z": _shift_z, "shift_xy": _shift_xy, "jog_z": _jog_z, "jog_xy": _jog_xy,
-    "reslope": _reslope,
+    "reslope": _reslope, "slide_wall": _slide_wall, "trim": _trim,
 }
 LADDER = {
     CLASH: ["shift_z", "shift_xy", "jog_z", "jog_xy"],
-    WALL: ["shift_xy", "shift_z", "jog_xy", "jog_z"],
+    WALL: ["slide_wall", "trim", "shift_xy", "shift_z", "jog_xy", "jog_z"],
     CLEAR: ["shift_z", "jog_z", "shift_xy"],
     SLOPE: ["reslope"],
 }
 
 
-MOVES_ENDS = {"shift_z", "shift_xy", "reslope"}
+MOVES_ENDS = {"shift_z", "shift_xy", "reslope", "slide_wall", "trim"}
 
 
 def _best(scene: Scene, pid: str, strategy: str, v: Violation, count: int):

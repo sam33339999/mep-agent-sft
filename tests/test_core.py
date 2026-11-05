@@ -108,7 +108,7 @@ def test_wall_opening_allows_pipe():
 def test_solver_slides_pipe_into_opening():
     res = solve(opening())
     assert res.ok
-    assert [(a.kind, a.detail) for a in res.actions] == [("shift_xy", {"dx": 1.05, "dy": 0.0})]
+    assert [(a.kind, a.detail) for a in res.actions] == [("slide_wall", {"dx": 1.05, "dy": 0.0})]
 
 
 def test_solid_wall_is_unsolvable():
@@ -144,3 +144,24 @@ def test_drainage_keeps_priority_over_water():
 def test_wall_openings_json_roundtrip():
     s = opening()
     assert Scene.from_json(s.to_json()).walls[0].openings == [Opening(4.0, 5.0, 0.0, 2.6)]
+
+
+def test_wall_without_opening_is_trimmed_not_dragged_outside():
+    s = Scene(
+        walls=[Wall("W", (0, 0), (10, 0))],
+        pipes=[Pipe("P", "water", 0.1, [(3.0, -0.8, 2.5), (3.0, 3.0, 2.5)])],
+    )
+    res = solve(s)
+    assert res.ok and [a.kind for a in res.actions] == ["trim"]
+    # longer (inside) side kept; new end is wall half-thickness + radius + 0.05 -> snapped 0.2 from the wall
+    assert res.fixed.pipe("P").points == [(3.0, 0.2, 2.5), (3.0, 3.0, 2.5)]
+    assert res.actions[0].detail["keep"] == "end"
+
+
+def test_trim_is_refused_when_too_little_pipe_would_remain():
+    s = Scene(
+        walls=[Wall("W", (0, 0), (10, 0))],
+        pipes=[Pipe("P", "water", 0.1, [(3.0, -0.4, 2.5), (3.0, 0.6, 2.5)])],
+    )
+    res = solve(s)
+    assert res.ok and res.actions[0].kind != "trim"  # 0.4 m would remain, below the 0.5 m floor
