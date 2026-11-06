@@ -34,6 +34,7 @@ help: ## 顯示這份指令清單
 	@echo "                    N=$(N)  SEED=$(SEED)  DIFFICULTY=<空=混合 1-4>"
 	@echo ""
 	@echo "範例:  make serve PORT=9000"
+	@echo "       make serve HOST=0.0.0.0        # 聽所有介面；瀏覽器開 http://<本機IP>:PORT"
 	@echo "       make data N=500 SEED=7 DIFFICULTY=3"
 
 install: ## 安裝依賴 (核心 + 測試工具)
@@ -42,7 +43,7 @@ install: ## 安裝依賴 (核心 + 測試工具)
 install-all: ## 安裝全部選配 (IFC 輸出、瀏覽器測試、HF datasets 檢查)
 	$(UV) sync --extra dev --extra ifc --extra e2e --extra trainfmt
 
-serve: ## 啟動審核網站 -> http://HOST:PORT (預設 http://127.0.0.1:8000)
+serve: ## 啟動審核網站 -> http://HOST:PORT (預設 127.0.0.1；區網 HOST=0.0.0.0)
 	@echo "網站: http://$(HOST):$(PORT)    資料庫: $(DB)    (Ctrl+C 結束)"
 	$(PY) serve --host $(HOST) --port $(PORT) --db $(DB)
 
